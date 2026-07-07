@@ -1,0 +1,23 @@
+services:
+  fleetdeck:
+    build: .
+    image: fleetdeck:latest
+    container_name: fleetdeck
+    restart: unless-stopped
+
+    # LAN-only. In production, bind to a specific LAN interface IP rather than
+    # exposing on all interfaces, e.g. "192.168.1.36:8080:8080".
+    # /boot/* is unauthenticated (firmware can't auth) — never expose to WAN.
+    ports:
+      - "8080:8080"
+
+    # Secrets stay out of this file. Copy .env.example to .env and fill it in.
+    # Vars consumed (see .env.example): TRUENAS_URL, TRUENAS_API_KEY,
+    # ADMIN_PASSWORD, COOKIE_SECRET, HTTP_PORT, HTTP_BIND, DRY_RUN, DB_PATH,
+    # IQN_PREFIX, GOLDEN_ZVOL, CLIENT_ZVOL_ROOT.
+    env_file: .env
+
+    # Persist the SQLite state file across container restarts/upgrades.
+    # DB_PATH (default /data/fleetdeck.sqlite3) must live under this mount.
+    volumes:
+      - ./data:/data

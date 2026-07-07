@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FleetDeck</title>
+<style>
+  :root {
+    --bg: #111; --panel: #1a1a1a; --panel2: #202020; --border: #2c2c2c;
+    --text: #ddd; --dim: #888; --dimmer: #666; --accent: #2fd6c6; --accent-d: #1c8f85;
+    --red: #e0574f; --green: #4fce6a; --amber: #d9a441; --gray: #666;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.4 system-ui, -apple-system, sans-serif; }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  a, button { color: inherit; }
+  button { background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    padding: 3px 8px; cursor: pointer; border-radius: 3px; font: inherit; font-size: 12px; }
+  button:hover { border-color: var(--accent-d); }
+  button.accent { background: var(--accent-d); border-color: var(--accent); color: #062b28; font-weight: 600; }
+  button.danger:hover { border-color: var(--red); color: var(--red); }
+  button:disabled { opacity: .4; cursor: default; }
+  input, select, textarea { background: #0c0c0c; border: 1px solid var(--border);
+    color: var(--text); padding: 4px 6px; border-radius: 3px; font: inherit; font-size: 12px; }
+  input:focus, select:focus { outline: none; border-color: var(--accent-d); }
+  header { display: flex; align-items: center; gap: 16px; padding: 8px 14px;
+    background: var(--panel); border-bottom: 1px solid var(--border); }
+  header .brand { font-weight: 700; letter-spacing: 1px; color: var(--accent); }
+  header .brand span { color: var(--dim); font-weight: 400; }
+  nav { display: flex; gap: 4px; }
+  nav button.active { background: var(--accent-d); border-color: var(--accent); color: #062b28; }
+  header .spacer { flex: 1; }
+  main { padding: 12px 14px; }
+  section { display: none; }
+  section.active { display: block; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim);
+    margin: 18px 0 8px; font-weight: 600; }
+  h2:first-child { margin-top: 0; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+    color: var(--dimmer); padding: 5px 8px; border-bottom: 1px solid var(--border); font-weight: 600; }
+  td { padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:hover td { background: var(--panel); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+  .s-booted .dot { background: var(--green); box-shadow: 0 0 5px var(--green); }
+  .s-offline .dot { background: var(--gray); }
+  .s-unknown .dot { background: #444; }
+  .s-unknown { color: var(--dimmer); }
+  .badge { font-size: 11px; color: var(--dim); }
+  .actions { white-space: nowrap; display: flex; gap: 4px; align-items: center; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 10px 12px; margin-bottom: 14px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .msg { font-size: 12px; margin-left: 8px; }
+  .msg.ok { color: var(--green); } .msg.err { color: var(--red); }
+  .grid { display: grid; grid-template-columns: 160px 1fr; gap: 8px 12px; max-width: 640px; align-items: center; }
+  .grid label { color: var(--dim); font-size: 12px; }
+  pre { background: #0c0c0c; border: 1px solid var(--border); padding: 8px; border-radius: 3px;
+    overflow-x: auto; font-family: var(--mono); font-size: 11px; margin: 4px 0; color: var(--dim); }
+  .login-wrap { display: flex; align-items: center; justify-content: center; height: 80vh; }
+  .login-box { background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 28px; width: 300px; }
+  .login-box .brand { color: var(--accent); font-weight: 700; letter-spacing: 2px; font-size: 18px; margin-bottom: 16px; }
+  .login-box input { width: 100%; margin-bottom: 10px; }
+  .login-box button { width: 100%; }
+  .muted { color: var(--dimmer); }
+  .toggle-on { color: var(--accent); font-weight: 600; }
+  .tag { font-size: 11px; padding: 1px 5px; border: 1px solid var(--border); border-radius: 3px; color: var(--dim); }
+</style>
+</head>
+<body>
+
+<div id="app" style="display:none">
+  <header>
+    <div class="brand">FLEET<span>DECK</span></div>
+    <nav>
+      <button data-view="dashboard" class="active">Dashboard</button>
+      <button data-view="golden">Golden</button>
+      <button data-view="settings">Settings</button>
+      <button data-view="events">Audit</button>
+    </nav>
+    <div class="spacer"></div>
+    <span id="poll-stamp" class="muted mono"></span>
+    <button id="logout">Logout</button>
+  </header>
+  <main>
+    <section id="dashboard" class="active">
+      <div class="panel">
+        <h2 style="margin-top:0">New client</h2>
+        <form id="new-client" class="row" autocomplete="off">
+          <input name="name" placeholder="name" required>
+          <input name="mac" placeholder="aa:bb:cc:dd:ee:ff" class="mono" required>
+          <input name="sizeOverride" placeholder="size override (opt)" style="width:150px">
+          <button class="accent" type="submit">Create</button>
+          <span id="nc-msg" class="msg"></span>
+        </form>
+      </div>
+      <div class="row" style="margin-bottom:6px">
+        <button id="bulk-reset" disabled>Reset selected</button>
+        <span id="bulk-msg" class="msg"></span>
+      </div>
+      <table id="clients">
+        <thead><tr>
+          <th style="width:24px"><input type="checkbox" id="sel-all"></th>
+          <th>Name</th><th>MAC</th><th>Zvol</th><th>Golden</th><th>Status</th>
+          <th>Space</th><th>Last boot</th><th>Flags</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="clients-body"></tbody>
+      </table>
+      <h2>Discovered clients</h2>
+      <table id="discovered">
+        <thead><tr><th>MAC</th><th>First seen</th><th>Last seen</th><th>Requests</th><th></th></tr></thead>
+        <tbody id="discovered-body"></tbody>
+      </table>
+    </section>
+
+    <section id="golden">
+      <div class="row" style="margin-bottom:10px">
+        <button id="promote" class="accent">Promote current golden as new version</button>
+        <span id="golden-msg" class="msg"></span>
+      </div>
+      <table>
+        <thead><tr><th>Snapshot</th><th>Used</th><th>Clients on it</th><th></th></tr></thead>
+        <tbody id="golden-body"></tbody>
+      </table>
+    </section>
+
+    <section id="settings">
+      <div class="panel">
+        <div id="settings-grid" class="grid"></div>
+        <div class="row" style="margin-top:12px">
+          <button id="save-settings" class="accent">Save</button>
+          <span id="settings-msg" class="msg"></span>
+        </div>
+      </div>
+    </section>
+
+    <section id="events">
+      <table>
+        <thead><tr><th>Timestamp</th><th>Action</th><th>Client</th><th>Actor</th><th></th></tr></thead>
+        <tbody id="events-body"></tbody>
+      </table>
+    </section>
+  </main>
+</div>
+
+<div id="login" class="login-wrap" style="display:none">
+  <form class="login-box" id="login-form">
+    <div class="brand">FLEETDECK</div>
+    <input type="password" name="password" placeholder="Password" autofocus required>
+    <button class="accent" type="submit">Unlock</button>
+    <div id="login-msg" class="msg err"></div>
+  </form>
+</div>
+
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const el = (t, p) => Object.assign(document.createElement(t), p || {});
+const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function api(method, path, body) {
+  const opt = { method, credentials: "same-origin", headers: {} };
+  if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+  const res = await fetch(path, opt);
+  if (res.status === 401) { showLogin(); throw new Error("unauthorized"); }
+  let data = null;
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) throw new Error((data && data.error) || (res.status + " " + res.statusText));
+  return data;
+}
+
+function showLogin() { $("#app").style.display = "none"; $("#login").style.display = "flex"; }
+function showApp() { $("#login").style.display = "none"; $("#app").style.display = "block"; }
+
+function fmtBytes(n) {
+  if (n == null) return "—";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i ? 1 : 0) + " " + u[i];
+}
+function fmtTime(t) {
+  if (!t) return "—";
+  const d = new Date(t), s = (Date.now() - d) / 1000;
+  if (isNaN(d)) return esc(t);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return d.toISOString().slice(0, 16).replace("T", " ");
+}
+
+// ---- Dashboard ----
+let clients = [];
+let goldenNames = [];
+
+function renderClients(list) {
+  clients = list;
+  const body = $("#clients-body");
+  const checked = new Set([...body.querySelectorAll(".sel:checked")].map(c => c.value));
+  body.innerHTML = "";
+  for (const c of list) {
+    const tr = el("tr");
+    tr.className = "s-" + c.status;
+    const picker = goldenNames.map(g => `<option${g === c.golden_snapshot ? " selected" : ""}>${esc(g)}</option>`).join("");
+    tr.innerHTML = `
+      <td><input type="checkbox" class="sel" value="${c.id}"${checked.has(String(c.id)) ? " checked" : ""}></td>
+      <td>${esc(c.name)}</td>
+      <td class="mono">${esc(c.mac)}</td>
+      <td class="mono muted">${esc(c.zvol)}</td>
+      <td class="mono badge">${esc(c.golden_snapshot)}</td>
+      <td><span class="dot"></span>${esc(c.status)}</td>
+      <td>${fmtBytes(c.space_used_bytes)}</td>
+      <td class="muted">${fmtTime(c.last_boot_at)}</td>
+      <td>${c.boot_golden_once ? '<span class="tag toggle-on">golden-once</span>' : ""}${c.nightly_reset ? ' <span class="tag">nightly</span>' : ""}</td>
+      <td class="actions">
+        <button data-act="reset" data-id="${c.id}">Reset</button>
+        <select data-act="rebase-pick" data-id="${c.id}" style="width:110px"><option value="">Rebase…</option>${picker}</select>
+        <button data-act="golden-once" data-id="${c.id}">${c.boot_golden_once ? "Unset⚑" : "Golden⚑"}</button>
+        <button class="danger" data-act="retire" data-id="${c.id}" data-name="${esc(c.name)}">Retire</button>
+      </td>`;
+    body.appendChild(tr);
+  }
+  updateBulkBtn();
+}
+
+function updateBulkBtn() {
+  const n = document.querySelectorAll("#clients-body .sel:checked").length;
+  $("#bulk-reset").disabled = n === 0;
+  $("#bulk-reset").textContent = n ? `Reset selected (${n})` : "Reset selected";
+}
+
+async function loadClients() {
+  try {
+    const list = await api("GET", "/api/clients");
+    renderClients(list);
+    $("#poll-stamp").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {}
+}
+
+async function loadDiscovered() {
+  let list = [];
+  try { list = await api("GET", "/api/discovered"); } catch (e) { return; }
+  const body = $("#discovered-body");
+  body.innerHTML = "";
+  if (!list.length) { body.innerHTML = '<tr><td colspan="5" class="muted">None</td></tr>'; return; }
+  for (const d of list) {
+    const tr = el("tr");
+    tr.innerHTML = `<td class="mono">${esc(d.mac)}</td><td class="muted">${fmtTime(d.first_seen_at)}</td>
+      <td class="muted">${fmtTime(d.last_seen_at)}</td><td>${esc(d.request_count)}</td>
+      <td><button class="accent" data-act="adopt" data-mac="${esc(d.mac)}">Adopt</button></td>`;
+    body.appendChild(tr);
+  }
+}
+
+// event delegation on dashboard tables
+$("#dashboard").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b) return;
+  const act = b.dataset.act, id = b.dataset.id;
+  try {
+    if (act === "reset") {
+      try { await api("POST", `/api/clients/${id}/reset`, {}); }
+      catch (err) {
+        if (/session/i.test(err.message) && confirm(err.message + "\nForce reset?"))
+          await api("POST", `/api/clients/${id}/reset`, { force: true });
+        else throw err;
+      }
+      loadClients();
+    } else if (act === "golden-once") {
+      await api("POST", `/api/clients/${id}/boot-golden-once`); loadClients();
+    } else if (act === "retire") {
+      const name = b.dataset.name;
+      if (prompt(`Type "${name}" to retire this client:`) === name) { await api("DELETE", `/api/clients/${id}`); loadClients(); }
+    } else if (act === "adopt") {
+      const name = prompt("Name for " + b.dataset.mac + ":");
+      if (name) { await api("POST", `/api/discovered/${encodeURIComponent(b.dataset.mac)}/adopt`, { name }); loadClients(); loadDiscovered(); }
+    }
+  } catch (err) { alert(err.message); }
+});
+
+$("#clients-body").addEventListener("change", async e => {
+  if (e.target.matches(".sel")) return updateBulkBtn();
+  const sel = e.target.closest("select[data-act='rebase-pick']");
+  if (sel && sel.value) {
+    const id = sel.dataset.id, snap = sel.value;
+    try {
+      try { await api("POST", `/api/clients/${id}/rebase`, { goldenSnapshot: snap }); }
+      catch (err) {
+        if (/session|409/i.test(err.message) && confirm(err.message + "\nForce rebase?"))
+          await api("POST", `/api/clients/${id}/rebase`, { goldenSnapshot: snap, force: true });
+        else throw err;
+      }
+      loadClients();
+    } catch (err) { alert(err.message); loadClients(); }
+  }
+});
+
+$("#sel-all").addEventListener("change", e => {
+  document.querySelectorAll("#clients-body .sel").forEach(c => c.checked = e.target.checked);
+  updateBulkBtn();
+});
+
+$("#bulk-reset").addEventListener("click", async () => {
+  const ids = [...document.querySelectorAll("#clients-body .sel:checked")].map(c => c.value);
+  let ok = 0, fail = 0;
+  for (const id of ids) {
+    try { await api("POST", `/api/clients/${id}/reset`, { force: true }); ok++; } catch (e) { fail++; }
+  }
+  $("#bulk-msg").textContent = `Reset ${ok} ok, ${fail} failed`;
+  $("#bulk-msg").className = "msg " + (fail ? "err" : "ok");
+  loadClients();
+});
+
+$("#new-client").addEventListener("submit", async e => {
+  e.preventDefault();
+  const f = e.target, body = { name: f.name.value.trim(), mac: f.mac.value.trim() };
+  if (f.sizeOverride.value.trim()) body.sizeOverride = f.sizeOverride.value.trim();
+  const msg = $("#nc-msg");
+  try {
+    await api("POST", "/api/clients", body);
+    f.reset(); msg.textContent = "Created"; msg.className = "msg ok"; loadClients();
+  } catch (err) { msg.textContent = err.message; msg.className = "msg err"; }
+});
+
+// ---- Golden ----
+async function loadGolden() {
+  let snaps = [];
+  try { snaps = await api("GET", "/api/golden/snapshots"); } catch (e) { return; }
+  goldenNames = snaps.map(s => s.name);
+  const latest = goldenNames.length ? goldenNames[goldenNames.length - 1] : null;
+  const body = $("#golden-body");
+  body.innerHTML = "";
+  for (const s of snaps) {
+    const on = (s.clients || []).map(c => esc(c.name)).join(", ") || '<span class="muted">none</span>';
+    const tr = el("tr");
+    tr.innerHTML = `<td class="mono">${esc(s.name)}</td><td>${fmtBytes(s.used)}</td>
+      <td>${on} <span class="muted">(${(s.clients || []).length})</span></td>
+      <td><button data-snap="${esc(s.name)}" data-act="bulk-rebase">Rebase stragglers here</button></td>`;
+    body.appendChild(tr);
+  }
+}
+
+$("#golden-body").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if (!b || b.dataset.act !== "bulk-rebase") return;
+  const snap = b.dataset.snap;
+  try { if (!clients.length) clients = await api("GET", "/api/clients"); } catch (er) {}
+  const ids = clients.filter(c => c.golden_snapshot !== snap).map(c => c.id);
+  if (!ids.length) { setMsg("#golden-msg", "All clients already on " + snap, true); return; }
+  if (!confirm(`Rebase ${ids.length} client(s) onto ${snap}?`)) return;
+  try {
+    const r = await api("POST", "/api/golden/bulk-rebase", { clientIds: ids, goldenSnapshot: snap, force: true });
+    const fail = (r.results || []).filter(x => !x.ok).length;
+    setMsg("#golden-msg", `Rebased ${(r.results || []).length - fail} ok, ${fail} failed`, !fail);
+    loadClients();
+  } catch (err) { setMsg("#golden-msg", err.message, false); }
+});
+
+$("#promote").addEventListener("click", async () => {
+  const label = prompt("Version label (optional):") || undefined;
+  try {
+    const r = await api("POST", "/api/golden/promote", label ? { versionLabel: label } : {});
+    setMsg("#golden-msg", "Promoted → " + (r && r.snapshot), true);
+    loadGolden();
+  } catch (err) { setMsg("#golden-msg", err.message, false); }
+});
+
+// ---- Settings ----
+async function loadSettings() {
+  let s = {};
+  try { s = await api("GET", "/api/settings"); } catch (e) { return; }
+  const g = $("#settings-grid"); g.innerHTML = "";
+  for (const k of Object.keys(s)) {
+    g.appendChild(el("label", { textContent: k }));
+    g.appendChild(el("input", { className: "mono", dataset: { key: k }, value: s[k] == null ? "" : s[k] }));
+  }
+}
+$("#save-settings").addEventListener("click", async () => {
+  const patch = {};
+  document.querySelectorAll("#settings-grid input").forEach(i => patch[i.dataset.key] = i.value);
+  try { await api("PUT", "/api/settings", patch); setMsg("#settings-msg", "Saved", true); }
+  catch (err) { setMsg("#settings-msg", err.message, false); }
+});
+
+// ---- Events ----
+async function loadEvents() {
+  let list = [];
+  try { list = await api("GET", "/api/events"); } catch (e) { return; }
+  const body = $("#events-body"); body.innerHTML = "";
+  for (const ev of list) {
+    const tr = el("tr");
+    tr.innerHTML = `<td class="mono muted">${esc((ev.ts || "").toString().replace("T", " ").slice(0, 19))}</td>
+      <td><span class="tag">${esc(ev.action)}</span></td><td>${esc(ev.client_id == null ? "—" : ev.client_id)}</td>
+      <td class="muted">${esc(ev.actor || "—")}</td>
+      <td><button data-id="${ev.id}">details</button></td>`;
+    const detail = el("tr"); detail.style.display = "none";
+    detail.innerHTML = `<td colspan="5"><pre>${esc(JSON.stringify({ before: safe(ev.before_json), after: safe(ev.after_json) }, null, 2))}</pre></td>`;
+    tr.querySelector("button").addEventListener("click", () => {
+      detail.style.display = detail.style.display === "none" ? "" : "none";
+    });
+    body.appendChild(tr); body.appendChild(detail);
+  }
+}
+function safe(j) { if (j == null) return null; try { return typeof j === "string" ? JSON.parse(j) : j; } catch (e) { return j; } }
+function setMsg(sel, txt, ok) { const m = $(sel); m.textContent = txt; m.className = "msg " + (ok ? "ok" : "err"); }
+
+// ---- Nav ----
+document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.remove("active"));
+  document.querySelectorAll("section").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  const v = b.dataset.view; $("#" + v).classList.add("active");
+  if (v === "golden") loadGolden();
+  else if (v === "settings") loadSettings();
+  else if (v === "events") loadEvents();
+}));
+
+$("#logout").addEventListener("click", async () => { try { await api("POST", "/api/auth/logout"); } catch (e) {} showLogin(); });
+$("#login-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  try {
+    await api("POST", "/api/auth/login", { password: e.target.password.value });
+    e.target.reset(); $("#login-msg").textContent = ""; boot();
+  } catch (err) { $("#login-msg").textContent = err.message === "unauthorized" ? "Wrong password" : err.message; }
+});
+
+// ---- Boot ----
+let pollTimer = null;
+async function boot() {
+  try {
+    const list = await api("GET", "/api/clients");
+    showApp();
+    try { goldenNames = (await api("GET", "/api/golden/snapshots")).map(s => s.name); } catch (e) {}
+    renderClients(list);
+    loadDiscovered();
+    if (!pollTimer) pollTimer = setInterval(() => {
+      if ($("#dashboard").classList.contains("active")) { loadClients(); loadDiscovered(); }
+    }, 10000);
+  } catch (e) { /* 401 handled by api() -> showLogin */ }
+}
+boot();
+</script>
+</body>
+</html>

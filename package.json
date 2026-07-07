@@ -1,0 +1,21 @@
+{
+  "name": "fleetdeck",
+  "version": "0.1.0",
+  "description": "Single-container web app managing a diskless Windows gaming fleet booting over iSCSI from TrueNAS SCALE",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
