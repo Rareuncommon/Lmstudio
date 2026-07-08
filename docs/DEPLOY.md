@@ -36,12 +36,23 @@ Set these in the app's environment config:
 | `CLIENT_ZVOL_ROOT` | e.g. `Main_pool/iscsi`. |
 | `POOL_NAME` | Pool name for capacity alerting, e.g. `Main_pool`. Defaults to `CLIENT_ZVOL_ROOT`'s first segment. |
 
-A few more tunables (`wol_enabled`, `pool_alert_threshold_pct`, `safety_snapshot_retention_days`, `nightly_reset_cron`) live in the in-app Settings panel, not as env vars — they take effect immediately without a restart.
+A few more tunables (`wol_enabled`, `wol_broadcast`, `pool_alert_threshold_pct`, `safety_snapshot_retention_days`, `nightly_reset_cron`) live in the in-app Settings panel, not as env vars — they take effect immediately without a restart.
+
+**Wake-on-LAN and container networking**
+
+If you enable `wol_enabled`, be aware the default bridge networking used by the Custom App (and docker-compose) blocks WoL's limited broadcast to `255.255.255.255` — the packet never leaves the bridge and machines silently don't wake. Either:
+
+- run the container with **host networking**, which sends the broadcast straight out the host's NIC (the reliable option), or
+- keep bridge networking and set the `wol_broadcast` setting (in-app Settings tab) to your LAN's **directed broadcast** address, e.g. `192.168.1.255`. Some routers/switches drop directed broadcasts — if machines still don't wake, switch to host networking.
 
 **Volume / storage**
 
 - Add a **host-path volume** mounting a persistent dataset to `/data` in the container.
 - This is where the SQLite file (`DB_PATH`) lives. Without it, all client/event state is lost on every app restart or upgrade.
+
+**One-time golden target for client creation**
+
+FleetDeck creates each new client's iSCSI target by copying the portal/initiator group configuration from an existing, working target — preferably the golden zvol's target (e.g. `win-golden`), else any target that has portal groups. Portal groups are what publish a target on a portal; the right portal/initiator ids are site-specific, so FleetDeck copies rather than guesses. Before creating the first client, make sure at least one working target exists in the TrueNAS UI (**Shares > iSCSI > Targets**) bound to the portal your fleet boots from. If none exists, client creation fails up front with nothing created.
 
 **One-time dataset for the safety-snapshot feature**
 

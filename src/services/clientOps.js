@@ -50,6 +50,25 @@ function targetMatches(sessionTarget, targetName) {
 
 async function assertNoActiveSession(ctx, client, force) {
   if (force) return;
+  // Strict === false: only the count-only degraded mode (set by
+  // adapter.introspect when sessionsList resolved to
+  // iscsi.global.client_count) takes this path — adapters without the
+  // property (test mocks, older code) keep the granular path below. On a
+  // count-only build listSessions() normalizes to [], which would read as
+  // "no sessions anywhere" and silently disable this guard; fail safe on the
+  // fleet-wide count instead. (The nightly scheduler always forces, so it's
+  // unaffected.)
+  if (ctx.adapter.sessionsGranular === false) {
+    const count = await ctx.adapter.sessionCount();
+    if (count > 0) {
+      throw new Error(
+        `${count} iSCSI session(s) are active somewhere on the fleet, and this TrueNAS build can ` +
+          `only report a count — not which target — so "${client.name}" cannot be proven idle; ` +
+          'pass { force: true } to proceed.'
+      );
+    }
+    return;
+  }
   const sessions = await ctx.adapter.listSessions();
   const active = (sessions || []).some((s) => targetMatches(s && s.target, client.target_name));
   if (active) {
@@ -108,6 +127,46 @@ async function resolveDefaultGolden(ctx) {
   return { id: last.id, name: last.name };
 }
 
+// A target's `groups` (portal + initiator-group bindings) is what makes it
+// visible to initiators at all, and the correct portal/initiator ids are
+// site-specific — we can't invent them. Copy them from a known-working target
+// instead: preferably the golden target (it demonstrably boots on the right
+// portal), else any existing target that has groups. Keep only the
+// create-schema fields per group — query results may carry extra decoration
+// (e.g. row ids) that iscsi.target.create would reject or misinterpret.
+function copyCreateGroups(groups) {
+  return groups.map((g) => ({
+    portal: g.portal,
+    initiator: g.initiator != null ? g.initiator : null,
+    authmethod: g.authmethod || 'NONE',
+    auth: g.auth != null ? g.auth : null,
+    auth_networks: Array.isArray(g.auth_networks) ? [...g.auth_networks] : [],
+  }));
+}
+
+function hasGroups(target) {
+  return target && Array.isArray(target.groups) && target.groups.length > 0;
+}
+
+async function resolveTargetGroups(ctx) {
+  const goldenTargetName = leafOf(ctx.config.goldenZvol);
+  const goldenRows = await ctx.adapter.queryTargets([['name', '=', goldenTargetName]]);
+  const golden = (Array.isArray(goldenRows) ? goldenRows : []).find(hasGroups);
+  if (golden) {
+    return { groups: copyCreateGroups(golden.groups), copiedFrom: golden.name || goldenTargetName };
+  }
+  const allRows = await ctx.adapter.queryTargets([]);
+  const fallback = (Array.isArray(allRows) ? allRows : []).find(hasGroups);
+  if (fallback) {
+    return { groups: copyCreateGroups(fallback.groups), copiedFrom: fallback.name };
+  }
+  throw new Error(
+    `No existing iSCSI target with portal groups found to copy from (looked for "${goldenTargetName}" first, ` +
+      'then any target). Create at least one working target — e.g. the golden target — in the TrueNAS UI ' +
+      'so FleetDeck has a portal/initiator group configuration to copy for new clients.'
+  );
+}
+
 async function rollback(ctx, created) {
   // Reverse order; swallow (log) errors so a rollback failure can't mask the
   // original error that triggered the unwind.
@@ -156,6 +215,9 @@ async function createClient(ctx, { name, mac }) {
   }
 
   const golden = await resolveDefaultGolden(ctx);
+  // Resolve portal groups BEFORE any mutation: if no template target exists,
+  // creation aborts here with nothing created and nothing to roll back.
+  const targetGroups = await resolveTargetGroups(ctx);
   const created = [];
   try {
     await ctx.adapter.cloneSnapshot(golden.id, zvol);
@@ -164,7 +226,7 @@ async function createClient(ctx, { name, mac }) {
     const extentId = await ctx.adapter.createExtent({ name: leaf, disk: `zvol/${zvol}` });
     created.push({ type: 'extent', ref: extentId });
 
-    const targetId = await ctx.adapter.createTarget({ name: leaf, iqn: ctx.config.iqnPrefix });
+    const targetId = await ctx.adapter.createTarget({ name: leaf, groups: targetGroups.groups });
     created.push({ type: 'target', ref: targetId });
 
     const targetExtentId = await ctx.adapter.createTargetExtent({ targetId, extentId, lunId: 0 });
@@ -176,7 +238,10 @@ async function createClient(ctx, { name, mac }) {
     logEvent(ctx.db, {
       action: 'client.create',
       clientId: newId,
-      after: { name, mac, zvol, target_name: leaf, golden_snapshot: golden.name },
+      after: {
+        name, mac, zvol, target_name: leaf, golden_snapshot: golden.name,
+        target_groups_copied_from: targetGroups.copiedFrom,
+      },
     });
     return getClient(ctx.db, newId);
   } catch (err) {
@@ -244,10 +309,16 @@ async function reclone(ctx, clientId, { force, rebaseTo }) {
 
   const wolEnabled = getSetting(ctx.db, 'wol_enabled', '0') === '1';
   if (wolEnabled && after.mac) {
-    sendWakeOnLan(after.mac).catch((err) => {
+    // The container typically runs on a bridge network, where a limited
+    // broadcast (255.255.255.255) never leaves the bridge — the operator must
+    // set wol_broadcast to the LAN's directed broadcast (e.g. 192.168.1.255)
+    // for magic packets to reach the fleet. Read at send time so a Settings
+    // change takes effect without a restart, like the other runtime tunables.
+    const broadcastAddress = getSetting(ctx.db, 'wol_broadcast', '255.255.255.255');
+    sendWakeOnLan(after.mac, { broadcastAddress }).catch((err) => {
       logEvent(ctx.db, { action: 'client.wol.failed', clientId, after: { error: err.message } });
     });
-    logEvent(ctx.db, { action: 'client.wol.sent', clientId, after: { mac: after.mac } });
+    logEvent(ctx.db, { action: 'client.wol.sent', clientId, after: { mac: after.mac, broadcast: broadcastAddress } });
   }
   return after;
 }
@@ -261,7 +332,7 @@ async function rebaseClient(ctx, clientId, { goldenSnapshot, force = false } = {
   return reclone(ctx, clientId, { force, rebaseTo: goldenSnapshot });
 }
 
-async function retireClient(ctx, clientId) {
+async function retireClient(ctx, clientId, { force = false } = {}) {
   const client = getClient(ctx.db, clientId);
   if (!client) throw new Error('Client not found');
 
@@ -274,6 +345,12 @@ async function retireClient(ctx, clientId) {
     logEvent(ctx.db, { action: 'client.retire.dryrun', clientId, before: client });
     return client;
   }
+
+  // Same live-session guard as reset/rebase (and in the same position,
+  // after the dryRun short-circuit): retiring deletes the target and zvol
+  // out from under a running Windows machine, which is at least as
+  // destructive as a reset and must demand the same explicit force.
+  await assertNoActiveSession(ctx, client, force);
 
   const leaf = leafOf(client.zvol);
 
@@ -298,8 +375,12 @@ async function retireClient(ctx, clientId) {
   await quarantineBeforeDestroy(ctx, client, clientId, 'retire');
 
   await ctx.adapter.deleteDataset(client.zvol, { recursive: true, force: true });
-  deleteClient(ctx.db, clientId);
+  // Log BEFORE deleting the row: events.client_id has an enforced FK to
+  // clients(id), so inserting this after the delete would be rejected.
+  // deleteClient detaches (nulls) the reference; before_json keeps the full
+  // client for the audit trail.
   logEvent(ctx.db, { action: 'client.retire', clientId, before: client });
+  deleteClient(ctx.db, clientId);
   return client;
 }
 

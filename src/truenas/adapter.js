@@ -21,14 +21,39 @@ const CANDIDATES = {
   sessionsList:       ['iscsi.global.sessions', 'iscsi.global.session_list', 'iscsi.global.client_count'],
 };
 
+// Payload shapes below were checked against https://api.truenas.com/v25.10/
+// (the api_methods_*.html pages). Note on jobs: that documentation marks
+// long-running job methods explicitly ("This method is a job.", e.g.
+// pool.scrub.scrub); none of the methods used here — including
+// pool.dataset.delete and pool.snapshot.clone — carry that marker in 25.10,
+// so every call() resolves with the final result and no core.job_wait
+// handling is needed. If a future TrueNAS release turns any of these into a
+// job, call() will start resolving with a job id instead of the result and a
+// job-wait helper will be required on TrueNASClient.
+
 class TrueNASAdapter {
   constructor(client) {
     this.client = client;
     this.methods = null;
+    // null until introspect(); false means sessionsList resolved to the
+    // count-only last resort (iscsi.global.client_count), which can't say
+    // WHICH target a session belongs to. Consumers (assertNoActiveSession,
+    // the session poller) must degrade fail-safe instead of treating the
+    // normalized-empty session list as "no sessions anywhere".
+    this.sessionsGranular = null;
   }
 
   async introspect() {
     this.methods = await resolveMethods(this.client, CANDIDATES);
+    this.sessionsGranular = this.methods.sessionsList !== 'iscsi.global.client_count';
+    if (!this.sessionsGranular) {
+      console.error(
+        '[adapter] WARNING: this TrueNAS build only exposes iscsi.global.client_count — ' +
+          'FleetDeck cannot tell which target a session belongs to. Per-client booted/offline ' +
+          'status is unavailable, and destructive operations will refuse whenever ANY session ' +
+          'is active on the fleet unless forced.'
+      );
+    }
     return this.methods;
   }
 
@@ -54,6 +79,11 @@ class TrueNASAdapter {
     ];
     const rows = await this._query('snapshotList', filters);
     const list = Array.isArray(rows) ? rows : [];
+    // Snapshot query entries carry the FULL '<dataset>@<snap>' name in
+    // id/name and the bare snap name in snapshot_name — so `id` here is
+    // exactly what cloneSnapshot's `snapshot` field requires (see the
+    // v25.10 pool.snapshot.clone note below), while `name` stays the short
+    // gold-vN label the UI and settings store use.
     return list.map((snap) => ({
       id: snap.id || snap.name,
       name: snap.snapshot_name || snap.name,
@@ -64,7 +94,9 @@ class TrueNASAdapter {
 
   async createSnapshot(dataset, name) {
     this._requireIntrospected();
-    // Best-guess field shape pending live TrueNAS verification.
+    // Verified against the v25.10 schema (pool.snapshot.create): { dataset,
+    // name } are exactly the required fields of the with-name variant; the
+    // created snapshot entry comes back, so id/name extraction below holds.
     const result = await this.client.call(this.methods.snapshotCreate, [
       { dataset, name },
     ]);
@@ -73,7 +105,11 @@ class TrueNASAdapter {
 
   async cloneSnapshot(snapshotId, targetDatasetName) {
     this._requireIntrospected();
-    // Best-guess field shape pending live TrueNAS verification.
+    // Verified against the v25.10 schema (pool.snapshot.clone): `snapshot`
+    // must be the FULL '<dataset>@<snap>' name (which listGoldenSnapshots /
+    // createSnapshot supply as the snapshot id) and `dataset_dst` the new
+    // dataset path. Returns the constant true on success, so the fallback to
+    // targetDatasetName below is what callers actually get back.
     const result = await this.client.call(this.methods.snapshotClone, [
       { snapshot: snapshotId, dataset_dst: targetDatasetName },
     ]);
@@ -86,6 +122,9 @@ class TrueNASAdapter {
     return null;
   }
 
+  // Verified against the v25.10 schema (pool.dataset.delete): positional
+  // [id, { recursive, force }]. Synchronous in 25.10 — not a job (see the
+  // jobs note above CANDIDATES).
   async deleteDataset(name, { recursive = false, force = false } = {}) {
     this._requireIntrospected();
     return this.client.call(this.methods.datasetDelete, [name, { recursive, force }]);
@@ -97,6 +136,9 @@ class TrueNASAdapter {
   // recursive delete is implemented. Callers that clone-to-preserve data before
   // a destructive operation (see clientOps.js's quarantineBeforeDestroy) must
   // promote the clone immediately afterward so it becomes fully independent.
+  // Verified against the v25.10 schema (pool.dataset.promote): positional
+  // [id] with the clone's full path; synchronous in 25.10 — not a job (see
+  // the jobs note above CANDIDATES).
   async promoteDataset(name) {
     this._requireIntrospected();
     return this.client.call(this.methods.datasetPromote, [name]);
@@ -104,7 +146,12 @@ class TrueNASAdapter {
 
   async createExtent({ name, disk }) {
     this._requireIntrospected();
-    // Best-guess field shape pending live TrueNAS verification.
+    // Verified against the v25.10 schema (iscsi.extent.create): { name,
+    // type: 'DISK', disk } with disk as the device path — 'zvol/<path>' for
+    // zvol-backed extents, which callers already prefix. The schema doesn't
+    // pin an escaping rule for spaces/special chars in that path, but
+    // FleetDeck slugs client names to [a-z0-9-] so its own zvol paths can
+    // never contain any.
     const result = await this.client.call(this.methods.extentCreate, [
       { name, type: 'DISK', disk },
     ]);
@@ -113,18 +160,32 @@ class TrueNASAdapter {
       : result;
   }
 
-  async createTarget({ name, iqn }) {
+  // Verified against the v25.10 schema (iscsi.target.create): `groups` is what
+  // binds a target to a portal (and optionally an initiator group), and it
+  // DEFAULTS TO [] — a target created without groups is not published on any
+  // portal, so initiators can never see or connect to it. That's why an empty
+  // `groups` is a hard error here instead of a silent default. (`alias` is just
+  // a human-readable label — the full IQN is derived by TrueNAS as
+  // `<global basename>:<name>` — so we don't send it at all.)
+  async createTarget({ name, groups }) {
     this._requireIntrospected();
-    // Best-guess field shape pending live TrueNAS verification.
+    if (!Array.isArray(groups) || groups.length === 0) {
+      throw new Error(
+        `Refusing to create iSCSI target "${name}" with no portal groups: it would be invisible to initiators.`
+      );
+    }
     const result = await this.client.call(this.methods.targetCreate, [
-      { name, alias: iqn },
+      { name, mode: 'ISCSI', groups },
     ]);
     return (result && result.id != null) ? result.id : result;
   }
 
   async createTargetExtent({ targetId, extentId, lunId = 0 }) {
     this._requireIntrospected();
-    // Best-guess field shape pending live TrueNAS verification.
+    // Verified against the v25.10 schema (iscsi.targetextent.create):
+    // { target, extent, lunid } — target/extent are the integer row ids,
+    // lunid may also be null for auto-assignment (we pin 0 deliberately:
+    // one LUN per target).
     const result = await this.client.call(this.methods.targetExtentCreate, [
       { target: targetId, extent: extentId, lunid: lunId },
     ]);
@@ -171,6 +232,18 @@ class TrueNASAdapter {
       initiator: s.initiator || s.initiator_name || s.client || null,
       ...s,
     }));
+  }
+
+  // Fleet-wide session count that works regardless of which sessionsList
+  // method introspection resolved to — the safety net for count-only builds
+  // (see sessionsGranular), where listSessions() normalizes to [] and would
+  // otherwise read as "nothing is booted".
+  async sessionCount() {
+    this._requireIntrospected();
+    const raw = await this.client.call(this.methods.sessionsList, []);
+    if (typeof raw === 'number') return raw;
+    if (Array.isArray(raw)) return raw.length;
+    return raw == null ? 0 : 1;
   }
 }
 
