@@ -21,6 +21,16 @@ const CANDIDATES = {
   sessionsList:       ['iscsi.global.sessions', 'iscsi.global.session_list', 'iscsi.global.client_count'],
 };
 
+// Payload shapes below were checked against https://api.truenas.com/v25.10/
+// (the api_methods_*.html pages). Note on jobs: that documentation marks
+// long-running job methods explicitly ("This method is a job.", e.g.
+// pool.scrub.scrub); none of the methods used here — including
+// pool.dataset.delete and pool.snapshot.clone — carry that marker in 25.10,
+// so every call() resolves with the final result and no core.job_wait
+// handling is needed. If a future TrueNAS release turns any of these into a
+// job, call() will start resolving with a job id instead of the result and a
+// job-wait helper will be required on TrueNASClient.
+
 class TrueNASAdapter {
   constructor(client) {
     this.client = client;
@@ -69,6 +79,11 @@ class TrueNASAdapter {
     ];
     const rows = await this._query('snapshotList', filters);
     const list = Array.isArray(rows) ? rows : [];
+    // Snapshot query entries carry the FULL '<dataset>@<snap>' name in
+    // id/name and the bare snap name in snapshot_name — so `id` here is
+    // exactly what cloneSnapshot's `snapshot` field requires (see the
+    // v25.10 pool.snapshot.clone note below), while `name` stays the short
+    // gold-vN label the UI and settings store use.
     return list.map((snap) => ({
       id: snap.id || snap.name,
       name: snap.snapshot_name || snap.name,
@@ -79,7 +94,9 @@ class TrueNASAdapter {
 
   async createSnapshot(dataset, name) {
     this._requireIntrospected();
-    // Best-guess field shape pending live TrueNAS verification.
+    // Verified against the v25.10 schema (pool.snapshot.create): { dataset,
+    // name } are exactly the required fields of the with-name variant; the
+    // created snapshot entry comes back, so id/name extraction below holds.
     const result = await this.client.call(this.methods.snapshotCreate, [
       { dataset, name },
     ]);
@@ -88,7 +105,11 @@ class TrueNASAdapter {
 
   async cloneSnapshot(snapshotId, targetDatasetName) {
     this._requireIntrospected();
-    // Best-guess field shape pending live TrueNAS verification.
+    // Verified against the v25.10 schema (pool.snapshot.clone): `snapshot`
+    // must be the FULL '<dataset>@<snap>' name (which listGoldenSnapshots /
+    // createSnapshot supply as the snapshot id) and `dataset_dst` the new
+    // dataset path. Returns the constant true on success, so the fallback to
+    // targetDatasetName below is what callers actually get back.
     const result = await this.client.call(this.methods.snapshotClone, [
       { snapshot: snapshotId, dataset_dst: targetDatasetName },
     ]);
@@ -101,6 +122,9 @@ class TrueNASAdapter {
     return null;
   }
 
+  // Verified against the v25.10 schema (pool.dataset.delete): positional
+  // [id, { recursive, force }]. Synchronous in 25.10 — not a job (see the
+  // jobs note above CANDIDATES).
   async deleteDataset(name, { recursive = false, force = false } = {}) {
     this._requireIntrospected();
     return this.client.call(this.methods.datasetDelete, [name, { recursive, force }]);
@@ -112,6 +136,9 @@ class TrueNASAdapter {
   // recursive delete is implemented. Callers that clone-to-preserve data before
   // a destructive operation (see clientOps.js's quarantineBeforeDestroy) must
   // promote the clone immediately afterward so it becomes fully independent.
+  // Verified against the v25.10 schema (pool.dataset.promote): positional
+  // [id] with the clone's full path; synchronous in 25.10 — not a job (see
+  // the jobs note above CANDIDATES).
   async promoteDataset(name) {
     this._requireIntrospected();
     return this.client.call(this.methods.datasetPromote, [name]);
@@ -119,7 +146,12 @@ class TrueNASAdapter {
 
   async createExtent({ name, disk }) {
     this._requireIntrospected();
-    // Best-guess field shape pending live TrueNAS verification.
+    // Verified against the v25.10 schema (iscsi.extent.create): { name,
+    // type: 'DISK', disk } with disk as the device path — 'zvol/<path>' for
+    // zvol-backed extents, which callers already prefix. The schema doesn't
+    // pin an escaping rule for spaces/special chars in that path, but
+    // FleetDeck slugs client names to [a-z0-9-] so its own zvol paths can
+    // never contain any.
     const result = await this.client.call(this.methods.extentCreate, [
       { name, type: 'DISK', disk },
     ]);
@@ -150,7 +182,10 @@ class TrueNASAdapter {
 
   async createTargetExtent({ targetId, extentId, lunId = 0 }) {
     this._requireIntrospected();
-    // Best-guess field shape pending live TrueNAS verification.
+    // Verified against the v25.10 schema (iscsi.targetextent.create):
+    // { target, extent, lunid } — target/extent are the integer row ids,
+    // lunid may also be null for auto-assignment (we pin 0 deliberately:
+    // one LUN per target).
     const result = await this.client.call(this.methods.targetExtentCreate, [
       { target: targetId, extent: extentId, lunid: lunId },
     ]);
