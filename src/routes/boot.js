@@ -24,6 +24,36 @@ function ipxe(res, body) {
 function createBootRouter(ctx) {
   const router = express.Router();
 
+  // Heartbeat contract for the golden image's disk-offline safety script:
+  // its SYSTEM scheduled task POSTs { safety_script_ran: true } here at
+  // startup. Unauthenticated by necessity (the machine has no credentials at
+  // boot), same trust boundary as the rest of /boot/* — the only effect is a
+  // timestamp on an already-known MAC, so the worst a LAN attacker can do is
+  // suppress a warning badge. A booted client with no recent heartbeat gets
+  // flagged in the UI: the safety script may not have run.
+  router.post('/boot/:mac/heartbeat', (req, res) => {
+    try {
+      let mac;
+      try {
+        mac = normalizeMac(req.params.mac);
+      } catch (e) {
+        return res.status(400).json({ error: 'malformed MAC' });
+      }
+      const client = getClientByMac(ctx.db, mac);
+      if (!client) return res.status(404).json({ error: 'unknown client' });
+      updateClient(ctx.db, client.id, { last_heartbeat_at: new Date().toISOString() });
+      logEvent(ctx.db, {
+        action: 'client.heartbeat',
+        clientId: client.id,
+        after: { safety_script_ran: !!(req.body && req.body.safety_script_ran) },
+      });
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      console.error('heartbeat route error:', err);
+      return res.status(500).json({ error: 'internal error' });
+    }
+  });
+
   router.get('/boot/:macfile', (req, res) => {
     try {
       const hexhyp = req.params.macfile.replace(/\.ipxe$/i, '');

@@ -130,6 +130,17 @@ pre { background: #0c0c0c; border: 1px solid var(--border); padding: var(--s2); 
 @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 .skel-row td > span { display: inline-block; min-width: 60px; }
 
+/* ---- In-use highlight (guest fleet): more than the status pill — the whole
+   row carries it, and the drawer gets a full-width banner. ---- */
+tr.in-use td { background: rgba(47, 214, 198, .05); }
+tr.in-use td:first-child { border-left: 3px solid var(--accent); }
+.inuse-banner { border: 1px solid var(--accent); background: rgba(47, 214, 198, .1);
+  border-radius: 4px; padding: var(--s2) var(--s3); margin-bottom: var(--s3);
+  color: var(--accent); font-weight: 600; display: flex; gap: var(--s2); align-items: center; }
+.inuse-banner .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent);
+  animation: pulse 2s ease-in-out infinite; }
+.tag.warn-hb { color: var(--amber); border-color: var(--amber); }
+
 /* ---- Golden Build Mode active-session banner ----
    Full-width, amber, impossible to miss: when it's showing, the live golden
    image is writable by a booted machine and every future clone inherits

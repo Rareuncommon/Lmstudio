@@ -21,6 +21,7 @@ const { createBulkImportRouter } = require('./routes/bulkImport');
 const { createGoldenBuildRouter } = require('./routes/goldenBuild');
 const { createBootFilesRouter } = require('./routes/bootFiles');
 const { createSetupRouter } = require('./routes/setup');
+const { createGuestRouter } = require('./routes/guest');
 const { ensureBootDirs, recordBootActivity } = require('./services/bootFiles');
 const { startTftpServer } = require('./services/tftp');
 const { createTrueNasStatusRouter } = require('./routes/truenas');
@@ -195,6 +196,11 @@ async function main() {
   app.use(createBulkImportRouter(ctx));
   app.use(createGoldenBuildRouter(ctx));
   app.use(createSetupRouter(ctx));
+  // Registered after the /api auth middleware so its /api/* routes are
+  // protected; its public GET /status is NOT under /api, so the auth scope
+  // never touches it — that page is unauthenticated by design (see
+  // routes/guest.js for the trust-boundary rationale).
+  app.use(createGuestRouter(ctx));
   app.use(createTrueNasStatusRouter(ctx));
 
   app.get('/api/events', (req, res) => {

@@ -207,3 +207,26 @@ chain <winpe_chain_url>
 - **`DRY_RUN` does not protect golden here.** `DRY_RUN=1` gates FleetDeck-initiated TrueNAS mutations (clone/create/delete); it does not gate boot-script serving, and Golden Build Mode is a serving change. An armed machine can therefore write to golden even under `DRY_RUN=1`. The real safety mechanisms are the single-session invariant, the golden-target session check, and the confirmation modal — not `DRY_RUN`.
 
 **Fallback.** The old manual method (a static per-MAC `.ipxe` file dropped into the `ipxeboot` server's `http/boot/`) still works if you ever need it, but it is no longer the documented primary path.
+
+---
+
+## 6. Guest-fleet features
+
+**Safety-script heartbeat contract.** The golden image's disk-offline scheduled task should, at startup, POST to FleetDeck (unauthenticated — the machine has no credentials at boot):
+
+```
+POST http://<fleetdeck-host>:<port>/boot/<mac-with-dashes-or-colons>/heartbeat
+Content-Type: application/json
+
+{"safety_script_ran": true}
+```
+
+e.g. from the safety `.ps1`: `Invoke-RestMethod -Method Post -Uri "http://192.168.1.36:8080/boot/$((Get-NetAdapter | Select -First 1).MacAddress)/heartbeat" -Body '{"safety_script_ran":true}' -ContentType 'application/json'`. FleetDeck stamps `last_heartbeat_at`; a booted client whose heartbeat hasn't arrived since its last boot gets a **"no heartbeat"** warning badge (the safety script may not have run). The generated `fleetdeck-safety.ps1` is a good place to add this call when you extend it.
+
+**Guest idle timeout.** `guest_idle_timeout_minutes` (Settings; 0 = disabled) reclaims machines whose session has been active longer than the limit, via a forced reset. **Limitation, stated plainly:** TrueNAS exposes no per-session idle/last-activity metric, so this enforces total session *duration*, not true idleness. Each session is reset at most once (the iSCSI session can outlive the reset until the machine reboots).
+
+**Public status page.** `GET /status` is intentionally unauthenticated and strictly minimal: machine display names + available/in-use, plus the `guest_motd` banner (Settings). No MACs, zvols, or other detail — it's the walk-up "which machine is free" board. This and `/boot/*` are the only unauthenticated data-bearing routes.
+
+**Kick.** The TrueNAS API cannot terminate a specific iSCSI session (there is no such RPC in v25.10), so the drawer's "Kick" is labeled and implemented as a **forced reset**: the disk is wiped and re-cloned under the live session; the machine keeps running from cache until it reboots.
+
+**QR stickers.** Each client's detail drawer offers a print-friendly QR (generated server-side with the pure-JS `qrcode` package) linking to the static `/troubleshoot.html` guest help page.

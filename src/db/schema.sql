@@ -71,3 +71,31 @@ CREATE TABLE IF NOT EXISTS golden_build_sessions (
   checklist_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_golden_build_sessions_active ON golden_build_sessions(mac, ended_at);
+
+-- Per-client iSCSI session history, populated by the session poller's
+-- offline->booted / booted->offline transitions. idle_reset_at marks that the
+-- guest-idle-timeout enforcement already fired for this session (the iSCSI
+-- session can outlive a forced reset, so without this marker the poller
+-- would re-reset every tick).
+CREATE TABLE IF NOT EXISTS sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER NOT NULL,
+  started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  ended_at TEXT,
+  duration_seconds INTEGER,
+  idle_reset_at TEXT,
+  FOREIGN KEY (client_id) REFERENCES clients(id)
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_client ON sessions(client_id, ended_at);
+
+-- Driver/hardware gaps in the current golden image, reported manually from
+-- the UI (or later by an extended heartbeat payload). Surfaced on the Golden
+-- tab as "known gaps in current golden image".
+CREATE TABLE IF NOT EXISTS discovered_hardware_gaps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id INTEGER,
+  mac TEXT,
+  description TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'manual',  -- 'manual' | 'heartbeat'
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);

@@ -16,7 +16,7 @@ changes.setMaxListeners(20);
 const CLIENT_COLUMNS = [
   'name', 'mac', 'zvol', 'target_name', 'golden_snapshot', 'raw_override',
   'boot_golden_once', 'nightly_reset', 'status', 'space_used_bytes',
-  'notes', 'last_boot_at',
+  'notes', 'last_boot_at', 'gpu_vendor', 'last_heartbeat_at',
 ];
 
 function initDb(dbPath) {
@@ -36,6 +36,19 @@ function initDb(dbPath) {
   }
   if (!gbCols.has('checklist_json')) {
     db.exec('ALTER TABLE golden_build_sessions ADD COLUMN checklist_json TEXT');
+  }
+  const clientCols = new Set(db.pragma('table_info(clients)').map((c) => c.name));
+  // gpu_vendor: 'amd' | 'nvidia' | 'intel' | 'unknown' | NULL. Set manually
+  // in the detail drawer for now; auto-detection would need the heartbeat
+  // payload extended with GPU info — deliberately not built until wanted.
+  if (!clientCols.has('gpu_vendor')) {
+    db.exec('ALTER TABLE clients ADD COLUMN gpu_vendor TEXT');
+  }
+  // Last time the golden image's safety-script heartbeat POSTed for this MAC;
+  // a booted client without a recent heartbeat gets a warning badge (the
+  // disk-offline safety script may not have run).
+  if (!clientCols.has('last_heartbeat_at')) {
+    db.exec('ALTER TABLE clients ADD COLUMN last_heartbeat_at TEXT');
   }
   return db;
 }
@@ -195,6 +208,59 @@ function deleteSafetySnapshotRecord(db, id) {
   db.prepare('DELETE FROM safety_snapshots WHERE id = ?').run(id);
 }
 
+// --- Client iSCSI session history -------------------------------------------
+
+function getOpenSession(db, clientId) {
+  return db.prepare(
+    'SELECT * FROM sessions WHERE client_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1'
+  ).get(clientId) || null;
+}
+
+function openSession(db, clientId) {
+  const info = db.prepare('INSERT INTO sessions (client_id) VALUES (?)').run(clientId);
+  return info.lastInsertRowid;
+}
+
+function closeSession(db, sessionId) {
+  // duration computed in SQL from the row's own started_at so clock math
+  // stays in one place and one timezone (UTC ISO strings throughout).
+  db.prepare(
+    `UPDATE sessions SET
+       ended_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+       duration_seconds = CAST((julianday('now') - julianday(started_at)) * 86400 AS INTEGER)
+     WHERE id = ? AND ended_at IS NULL`
+  ).run(sessionId);
+}
+
+function markSessionIdleReset(db, sessionId) {
+  db.prepare(
+    "UPDATE sessions SET idle_reset_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?"
+  ).run(sessionId);
+}
+
+function listClientSessions(db, clientId, { limit = 50 } = {}) {
+  return db.prepare(
+    'SELECT * FROM sessions WHERE client_id = ? ORDER BY id DESC LIMIT ?'
+  ).all(clientId, limit);
+}
+
+// --- Hardware gap reports -----------------------------------------------------
+
+function insertHardwareGap(db, { clientId = null, mac = null, description, source = 'manual' }) {
+  const info = db.prepare(
+    'INSERT INTO discovered_hardware_gaps (client_id, mac, description, source) VALUES (?, ?, ?, ?)'
+  ).run(clientId, mac, description, source);
+  return info.lastInsertRowid;
+}
+
+function listHardwareGaps(db) {
+  return db.prepare('SELECT * FROM discovered_hardware_gaps ORDER BY id DESC').all();
+}
+
+function deleteHardwareGap(db, id) {
+  db.prepare('DELETE FROM discovered_hardware_gaps WHERE id = ?').run(id);
+}
+
 // --- Golden Build Mode sessions -------------------------------------------
 // Invariant: at most one row with ended_at IS NULL, ever. Enforced here (not
 // by a DB constraint) so the same query can drive the UI's disabled state.
@@ -280,5 +346,7 @@ module.exports = {
   getActiveGoldenBuildSession, insertGoldenBuildSession,
   updateGoldenBuildSession,
   closeActiveGoldenBuildSession, closeExpiredGoldenBuildSessions,
+  getOpenSession, openSession, closeSession, markSessionIdleReset, listClientSessions,
+  insertHardwareGap, listHardwareGaps, deleteHardwareGap,
   changes,
 };

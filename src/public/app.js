@@ -263,7 +263,7 @@ function renderClients() {
 
   body.innerHTML = "";
   for (const c of pageList) {
-    const tr = el("tr", { className: "clickable" });
+    const tr = el("tr", { className: "clickable" + (c.status === "booted" ? " in-use" : "") });
     tr.dataset.id = c.id;
     const picker = state.goldenNames.map((g) =>
       `<option${g === c.golden_snapshot ? " selected" : ""}>${esc(g)}</option>`).join("");
@@ -276,7 +276,7 @@ function renderClients() {
       <td data-th="Status">${statusBadge(c.status)}</td>
       <td data-th="Space">${fmtBytes(c.space_used_bytes)}</td>
       <td data-th="Last boot" class="muted">${fmtTime(c.last_boot_at)}</td>
-      <td data-th="Flags">${c.boot_golden_once ? '<span class="tag toggle-on">golden-once</span>' : ""}${c.nightly_reset ? ' <span class="tag">nightly</span>' : ""}</td>
+      <td data-th="Flags">${c.boot_golden_once ? '<span class="tag toggle-on">golden-once</span>' : ""}${c.nightly_reset ? ' <span class="tag">nightly</span>' : ""}${heartbeatWarning(c) ? ' <span class="tag warn-hb" title="Booted but the safety-script heartbeat has not arrived — the disk-offline script may not have run">no heartbeat</span>' : ""}</td>
       <td data-th="Actions" class="actions">
         <button data-act="reset" data-id="${c.id}">Reset</button>
         <select data-act="rebase-pick" data-id="${c.id}" style="width:110px"><option value="">Rebase…</option>${picker}</select>
@@ -689,10 +689,28 @@ function lineageHTML(client, events) {
   }).join("");
 }
 
+// A booted client with no heartbeat since its last boot (plus a grace period
+// for the machine to finish starting) means the safety script may not have
+// run — surfaced as a warning badge, not silently assumed fine.
+function heartbeatWarning(c) {
+  if (c.status !== "booted" || !c.last_boot_at) return false;
+  const boot = new Date(c.last_boot_at).getTime();
+  if (Date.now() - boot < 10 * 60 * 1000) return false; // still starting up
+  return !c.last_heartbeat_at || new Date(c.last_heartbeat_at).getTime() < boot;
+}
+
+function fmtDuration(sec) {
+  if (sec == null) return "—";
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
 async function openDrawer(id) {
   const c = state.clients.find((x) => x.id === id);
   if (!c) return;
   drawerClientId = id;
+  const gpuOpts = ["", "amd", "nvidia", "intel", "unknown"].map((v) =>
+    `<option value="${v}"${(c.gpu_vendor || "") === v ? " selected" : ""}>${v || "— unset —"}</option>`).join("");
   const drawer = $("#drawer-root .drawer");
   drawer.innerHTML = `
     <header>
@@ -701,6 +719,8 @@ async function openDrawer(id) {
       <button data-close>✕</button>
     </header>
     <div class="content">
+      ${c.status === "booted" ? `<div class="inuse-banner"><span class="dot"></span>IN USE — live iSCSI session on this machine</div>` : ""}
+      ${heartbeatWarning(c) ? `<div class="inuse-banner" style="border-color:var(--amber);background:rgba(217,164,65,.1);color:var(--amber)">⚠ No safety-script heartbeat since boot — local disks may not be offline</div>` : ""}
       <div class="kv">
         <span class="k">MAC</span><span class="mono">${esc(c.mac)}</span>
         <span class="k">Zvol</span><span class="mono">${esc(c.zvol)}</span>
@@ -708,19 +728,85 @@ async function openDrawer(id) {
         <span class="k">Golden</span><span class="mono">${esc(c.golden_snapshot)}</span>
         <span class="k">Space</span><span>${fmtBytes(c.space_used_bytes)}</span>
         <span class="k">Last boot</span><span>${fmtTime(c.last_boot_at)}</span>
+        <span class="k">Heartbeat</span><span>${fmtTime(c.last_heartbeat_at)}</span>
         <span class="k">Created</span><span>${fmtTime(c.created_at)}</span>
+        <span class="k">GPU</span><span><select data-gpu style="width:120px">${gpuOpts}</select></span>
         <span class="k">Flags</span><span>${c.boot_golden_once ? '<span class="tag toggle-on">golden-once</span> ' : ""}${c.nightly_reset ? '<span class="tag">nightly</span>' : ""}</span>
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <button class="danger" data-kick title="TrueNAS's API cannot terminate an iSCSI session, so this wipes and re-clones the disk under the live session — the machine keeps running from cache until reboot">Kick (forced reset)</button>
+        <button data-qr>QR sticker</button>
+        <button data-gap>Report driver gap</button>
       </div>
       <h2>Snapshot lineage</h2>
       <div data-lineage><div class="skel" style="height:40px"></div></div>
       <h2>Session history</h2>
-      <div class="muted">Per-session history lands with the sessions table (Phase 2); this panel will list start/end/duration here.</div>
+      <div data-sessions><div class="skel" style="height:40px"></div></div>
       <h2>Audit history</h2>
       <div data-drawer-events><div class="skel" style="height:80px"></div></div>
     </div>`;
   drawer.querySelector("[data-close]").addEventListener("click", closeDrawer);
+
+  drawer.querySelector("[data-gpu]").addEventListener("change", async (e) => {
+    try {
+      await api("POST", `/api/clients/${id}/meta`, { gpu_vendor: e.target.value || null });
+      toast("GPU vendor saved");
+      loadClients();
+    } catch (err) { toast(err.message, "err"); }
+  });
+
+  drawer.querySelector("[data-kick]").addEventListener("click", async () => {
+    const ok = await confirmModal("Kick (forced reset)",
+      `<p><b>Honest label:</b> the TrueNAS API has no way to terminate a specific iSCSI session, so "kick" force-resets the disk: it is wiped and re-cloned <b>under the live session</b>. The machine keeps running from cache until it reboots, at which point it gets the clean image.</p>`,
+      { danger: true, confirmText: "Force reset" });
+    if (!ok) return;
+    try {
+      await api("POST", `/api/clients/${id}/kick`);
+      toast(`${c.name}: kicked (forced reset)`);
+      loadClients();
+    } catch (err) { toast(err.message, "err"); }
+  });
+
+  drawer.querySelector("[data-qr]").addEventListener("click", () => {
+    // Print-friendly window: QR + machine name, sized for a sticker.
+    const w = window.open("", "_blank", "width=340,height=420");
+    w.document.write(`<title>${esc(c.name)} QR</title>
+      <div style="font-family:system-ui;text-align:center;padding:16px">
+      <img src="/api/clients/${id}/qr.svg" width="240" height="240" alt="QR">
+      <div style="font-size:20px;font-weight:700;margin-top:8px">${esc(c.name)}</div>
+      <div style="font-size:12px;color:#555">Scan for troubleshooting help</div>
+      <button onclick="print()" style="margin-top:12px">Print</button></div>`);
+  });
+
+  drawer.querySelector("[data-gap]").addEventListener("click", async () => {
+    const vals = await openModal({
+      title: `Report a driver gap (${c.name})`,
+      bodyHTML: "<p>Logged against the current golden image and listed on the Golden tab as a known gap — e.g. a device that has no driver after imaging.</p>",
+      confirmText: "Report",
+      fields: [{ name: "description", label: "What's missing?", placeholder: "e.g. Realtek 2.5GbE NIC shows as Unknown Device" }],
+    });
+    if (!vals || !vals.description.trim()) return;
+    try {
+      await api("POST", "/api/hardware-gaps", { client_id: id, mac: c.mac, description: vals.description.trim() });
+      toast("Driver gap reported");
+    } catch (err) { toast(err.message, "err"); }
+  });
+
   $("#drawer-root").classList.add("open");
   await refreshDrawerEvents();
+  // Session history (populated by the poller's status transitions).
+  try {
+    const sessions = await api("GET", `/api/clients/${id}/sessions`);
+    const root = $("#drawer-root [data-sessions]");
+    if (root) {
+      root.innerHTML = sessions.length ? sessions.map((s) => `
+        <div class="evt${s.idle_reset_at ? " fail" : ""}">
+          <div>${esc(fmtTime(s.started_at))} → ${s.ended_at ? esc(fmtTime(s.ended_at)) : '<b style="color:var(--accent)">active</b>'}
+            <span class="muted">(${fmtDuration(s.duration_seconds)})</span>
+            ${s.idle_reset_at ? '<span class="tag warn-hb">idle-timeout reset</span>' : ""}</div>
+        </div>`).join("") : '<div class="muted">No sessions recorded yet.</div>';
+    }
+  } catch (e) {}
 }
 
 async function refreshDrawerEvents() {
@@ -902,8 +988,35 @@ function applyGoldenBuildDisabled() {
 
 /* ============================ Golden tab ================================ */
 
+async function loadHardwareGaps() {
+  let gaps = [];
+  try { gaps = await api("GET", "/api/hardware-gaps"); } catch (e) { return; }
+  const body = $("#gaps-body");
+  body.innerHTML = gaps.length ? "" : '<tr><td colspan="4" class="muted">None reported</td></tr>';
+  for (const g of gaps) {
+    const c = state.clients.find((x) => x.id === g.client_id);
+    const tr = el("tr");
+    tr.innerHTML = `<td class="muted">${fmtTime(g.created_at)}</td>
+      <td>${esc(c ? c.name : (g.mac || "—"))}</td>
+      <td>${esc(g.description)}</td>
+      <td><button data-gap-resolve="${g.id}">Resolved in new image</button></td>`;
+    body.appendChild(tr);
+  }
+}
+
+$("#gaps-body").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-gap-resolve]");
+  if (!b) return;
+  try {
+    await api("DELETE", `/api/hardware-gaps/${b.dataset.gapResolve}`);
+    toast("Gap marked resolved");
+    loadHardwareGaps();
+  } catch (err) { toast(err.message, "err"); }
+});
+
 async function loadGolden() {
   await loadGoldenBuildStatus();
+  loadHardwareGaps();
   let snaps = [];
   try { snaps = await api("GET", "/api/golden/snapshots"); } catch (e) { return; }
   state.goldenNames = snaps.map((s) => s.name);
@@ -1285,6 +1398,12 @@ const SETTINGS_DEFAULTS = {
   // boot, and an optional preselected dism image index ("" = prompt in WinPE).
   nic_boot_services: "rt640x64,e1d,e2f,e1i65x64",
   golden_image_index: "",
+  // Guest fleet: 0 = disabled. NOTE: TrueNAS exposes no per-session idle
+  // metric, so this enforces total session DURATION, not true idleness.
+  guest_idle_timeout_minutes: "0",
+  // Shown as a banner on the public /status page (FleetDeck cannot display
+  // text inside Windows itself; bake anything in-OS into the golden image).
+  guest_motd: "",
 };
 async function loadSettings() {
   let s = {};
