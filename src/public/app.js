@@ -788,6 +788,7 @@ async function loadGoldenBuildStatus() {
   try {
     const r = await api("GET", "/api/golden-build/status");
     state.goldenBuild = (r && r.active) || null;
+    state.goldenBuildChecklist = (r && r.checklist) || [];
   } catch (e) { return; }
   renderGoldenBuildBanner();
   applyGoldenBuildDisabled();
@@ -809,18 +810,68 @@ function renderGoldenBuildBanner() {
   if (!root) return;
   const gb = state.goldenBuild;
   if (!gb) { root.innerHTML = ""; return; }
-  root.innerHTML = `<div class="gb-banner">
-    <span class="icon">⚠️</span>
-    <div>
-      <div class="headline">Golden Build Mode is ACTIVE</div>
-      <div class="detail">Machine <span class="mono">${esc(gb.mac)}</span> has direct write access to the live golden image. Every client cloned or reset after this session inherits its changes.</div>
+
+  const phase = gb.phase || "install";
+  const phaseChip = phase === "install"
+    ? '<span class="tag" style="color:var(--amber);border-color:var(--amber)">phase: install (WinPE)</span>'
+    : '<span class="tag toggle-on">phase: boot_installed (sanboot)</span>';
+  const otherPhase = phase === "install" ? "boot_installed" : "install";
+
+  let checklistState = {};
+  try { checklistState = JSON.parse(gb.checklist_json || "{}"); } catch (e) {}
+  const items = (state.goldenBuildChecklist || []).map((step) => `
+    <label class="row" style="padding:2px 0;gap:8px;cursor:pointer">
+      <input type="checkbox" data-gb-check="${esc(step.id)}"${checklistState[step.id] ? " checked" : ""}>
+      <span class="${checklistState[step.id] ? "muted" : ""}" style="${checklistState[step.id] ? "text-decoration:line-through" : ""}">${esc(step.label)}</span>
+    </label>`).join("");
+
+  root.innerHTML = `<div class="gb-banner" style="flex-direction:column;align-items:stretch">
+    <div class="row" style="gap:14px">
+      <span class="icon">⚠️</span>
+      <div>
+        <div class="headline">Golden Build Mode is ACTIVE ${phaseChip}</div>
+        <div class="detail">Machine <span class="mono">${esc(gb.mac)}</span> has direct write access to the live golden image. Every client cloned or reset after this session inherits its changes.</div>
+      </div>
+      <span class="spacer"></span>
+      <div class="detail">Auto-expires in <span class="remain">${esc(fmtRemaining(gb.expires_at))}</span></div>
+      <button id="gb-phase">Switch to ${esc(otherPhase)}</button>
+      <button class="danger" id="gb-end">End session</button>
     </div>
-    <span class="spacer"></span>
-    <div class="detail">Auto-expires in <span class="remain">${esc(fmtRemaining(gb.expires_at))}</span></div>
-    <button class="danger" id="gb-end">End session</button>
+    <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
+      <div class="detail" style="margin-bottom:4px"><b>Guided workflow</b> — the un-automatable steps are instructions; tick them off as you go (persisted on the session):</div>
+      ${items}
+      <div class="detail" style="margin-top:6px">
+        Fetch the deploy script in WinPE — SMB is the guaranteed transport (PowerShell is an optional WinPE component, present on most retail Setup media but not promised):<br>
+        <span class="mono">net use M: \\\\&lt;truenas-host&gt;\\fleetdeck-bootfiles &amp;&amp; M:\\deploy.cmd</span><br>
+        or, where PowerShell exists in the boot.wim:<br>
+        <span class="mono">powershell -c "iwr http://${esc(location.host)}/boot/files/deploy.cmd -OutFile X:\\d.cmd" &amp;&amp; X:\\d.cmd</span>
+      </div>
+    </div>
   </div>`;
-  const endBtn = $("#gb-end");
-  if (endBtn) endBtn.addEventListener("click", goldenBuildEndFlow);
+
+  $("#gb-end").addEventListener("click", goldenBuildEndFlow);
+  $("#gb-phase").addEventListener("click", () => goldenBuildPhaseFlow(otherPhase));
+  root.querySelectorAll("[data-gb-check]").forEach((cb) => cb.addEventListener("change", async (e) => {
+    try {
+      const session = await api("POST", "/api/golden-build/checklist", { step: e.target.dataset.gbCheck, done: e.target.checked });
+      state.goldenBuild = session;
+      renderGoldenBuildBanner();
+    } catch (err) { toast(err.message, "err"); }
+  }));
+}
+
+async function goldenBuildPhaseFlow(phase) {
+  const explain = phase === "boot_installed"
+    ? "<p>Switch AFTER the deploy script finished (image applied, bcdboot run). The machine's next PXE boot will <b>sanboot the installed OS</b> from the golden zvol instead of loading WinPE.</p>"
+    : "<p>Switch back to the install phase: the machine's next PXE boot loads <b>WinPE for imaging</b> again (e.g. to redo a failed apply).</p>";
+  const ok = await confirmModal(`Switch phase to ${phase}`, explain, { confirmText: "Switch phase" });
+  if (!ok) return;
+  try {
+    const session = await api("POST", "/api/golden-build/phase", { phase });
+    state.goldenBuild = session;
+    toast(`Phase switched to ${phase}`);
+    renderGoldenBuildBanner();
+  } catch (err) { toast(err.message, "err"); }
 }
 
 async function goldenBuildEndFlow() {
@@ -1230,6 +1281,10 @@ const SETTINGS_DEFAULTS = {
   // /mnt/Main_pool/apps/fleetdeck) — needed to create the SMB staging share.
   bootfiles_host_path: "",
   bootfiles_smb_share_name: "fleetdeck-bootfiles",
+  // deploy.cmd generation: NIC driver services that need Start=0 for iSCSI
+  // boot, and an optional preselected dism image index ("" = prompt in WinPE).
+  nic_boot_services: "rt640x64,e1d,e2f,e1i65x64",
+  golden_image_index: "",
 };
 async function loadSettings() {
   let s = {};

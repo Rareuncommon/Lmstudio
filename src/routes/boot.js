@@ -1,7 +1,9 @@
 const express = require('express');
 
 const { normalizeMac, fromHexHyp } = require('../services/mac');
-const { renderBootScript, renderUnknownScript, renderGoldenBuildScript } = require('../services/ipxeTemplate');
+const {
+  renderBootScript, renderUnknownScript, renderGoldenBuildScript, renderGoldenBootScript,
+} = require('../services/ipxeTemplate');
 const {
   getClientByMac,
   updateClient,
@@ -42,27 +44,40 @@ function createBootRouter(ctx) {
       const buildSession = getActiveGoldenBuildSession(ctx.db);
       if (buildSession && buildSession.mac === mac) {
         const settings = getAllSettings(ctx.db);
-        const winpeChainUrl = settings.winpe_chain_url;
-        if (!winpeChainUrl) {
-          // arm() rejects when winpe_chain_url is unset, but it could have been
-          // cleared after arming — never emit a script with a blank chain target.
-          logEvent(ctx.db, {
-            action: 'boot.golden_build_serve.error',
-            after: { mac, session_id: buildSession.id, error: 'winpe_chain_url unset' },
+        let script;
+        if (buildSession.phase === 'boot_installed') {
+          // Post-install phase: the image is applied and bcdboot has run —
+          // the machine must now sanboot the installed OS from the golden
+          // zvol itself. Serving WinPE again here is exactly the wrong-phase
+          // bug that used to need a manual static-file override.
+          script = renderGoldenBootScript({
+            settings,
+            truenasHost: ctx.config.truenasHost,
+            goldenZvol: ctx.config.goldenZvol,
           });
-          return ipxe(res, '#!ipxe\necho Golden Build Mode armed but winpe_chain_url is unset in FleetDeck\nshell\n');
+        } else {
+          const winpeChainUrl = settings.winpe_chain_url;
+          if (!winpeChainUrl) {
+            // arm() rejects when winpe_chain_url is unset, but it could have
+            // been cleared after arming — never emit a blank chain target.
+            logEvent(ctx.db, {
+              action: 'boot.golden_build_serve.error',
+              after: { mac, session_id: buildSession.id, error: 'winpe_chain_url unset' },
+            });
+            return ipxe(res, '#!ipxe\necho Golden Build Mode armed but winpe_chain_url is unset in FleetDeck\nshell\n');
+          }
+          script = renderGoldenBuildScript({
+            settings,
+            truenasHost: ctx.config.truenasHost,
+            goldenZvol: ctx.config.goldenZvol,
+            winpeChainUrl,
+          });
         }
-        const script = renderGoldenBuildScript({
-          settings,
-          truenasHost: ctx.config.truenasHost,
-          goldenZvol: ctx.config.goldenZvol,
-          winpeChainUrl,
-        });
         // Distinct from boot.serve: this is a meaningfully different (and more
         // consequential) thing to have happened than a normal client boot.
         logEvent(ctx.db, {
           action: 'boot.golden_build_serve',
-          after: { mac, session_id: buildSession.id },
+          after: { mac, session_id: buildSession.id, phase: buildSession.phase || 'install' },
         });
         return ipxe(res, script);
       }

@@ -54,12 +54,20 @@ CREATE TABLE IF NOT EXISTS safety_snapshots (
 -- (see db/index.js insertGoldenBuildSession) rather than by a DB constraint,
 -- because the same "is one already active?" query also drives the UI's
 -- disabled state. ended_reason is 'expired' | 'manual' | NULL while active.
+-- phase: 'install' serves sanhook+WinPE (imaging); 'boot_installed' serves a
+-- plain sanboot of the golden target (first boot of the installed OS). The
+-- operator switches phase from the Golden tab after the image is applied —
+-- this replaces the manual static-file override the old flow needed the
+-- moment the install finished. checklist_json persists the guided-workflow
+-- step states for the session.
 CREATE TABLE IF NOT EXISTS golden_build_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   mac TEXT NOT NULL,
   started_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   ended_at TEXT,
-  ended_reason TEXT
+  ended_reason TEXT,
+  phase TEXT NOT NULL DEFAULT 'install',
+  checklist_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_golden_build_sessions_active ON golden_build_sessions(mac, ended_at);

@@ -26,6 +26,17 @@ function initDb(dbPath) {
   db.pragma('journal_mode = WAL');
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   db.exec(schema);
+  // Minimal in-place migrations: CREATE TABLE IF NOT EXISTS never alters an
+  // existing table, so columns added after a table shipped must be ALTERed
+  // in for databases created before them. ADD COLUMN with a DEFAULT is safe
+  // and instant in SQLite; guarded by a pragma check so it's idempotent.
+  const gbCols = new Set(db.pragma('table_info(golden_build_sessions)').map((c) => c.name));
+  if (!gbCols.has('phase')) {
+    db.exec("ALTER TABLE golden_build_sessions ADD COLUMN phase TEXT NOT NULL DEFAULT 'install'");
+  }
+  if (!gbCols.has('checklist_json')) {
+    db.exec('ALTER TABLE golden_build_sessions ADD COLUMN checklist_json TEXT');
+  }
   return db;
 }
 
@@ -219,6 +230,19 @@ function insertGoldenBuildSession(db, { mac, startedAt, expiresAt }) {
   return tx();
 }
 
+// Column-whitelisted update for the active-session workflow fields (phase
+// switches, checklist progress). Only ever touches the given row.
+const GOLDEN_BUILD_MUTABLE = ['phase', 'checklist_json'];
+
+function updateGoldenBuildSession(db, id, fields) {
+  const keys = Object.keys(fields).filter((k) => GOLDEN_BUILD_MUTABLE.includes(k));
+  if (keys.length === 0) return;
+  const assignments = keys.map((k) => `${k} = @${k}`).join(', ');
+  const params = { id };
+  for (const k of keys) params[k] = fields[k];
+  db.prepare(`UPDATE golden_build_sessions SET ${assignments} WHERE id = @id`).run(params);
+}
+
 // Ends the current active session (if any). Idempotent: returns null and does
 // nothing when none is active, so double-ending is a harmless no-op.
 function closeActiveGoldenBuildSession(db, reason) {
@@ -254,6 +278,7 @@ module.exports = {
   upsertDiscovered, listDiscovered, removeDiscovered,
   insertSafetySnapshot, listExpiredSafetySnapshots, deleteSafetySnapshotRecord,
   getActiveGoldenBuildSession, insertGoldenBuildSession,
+  updateGoldenBuildSession,
   closeActiveGoldenBuildSession, closeExpiredGoldenBuildSessions,
   changes,
 };

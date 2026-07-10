@@ -184,12 +184,21 @@ chain <winpe_chain_url>
 
 `<golden target>` is the last path segment of `GOLDEN_ZVOL` (e.g. `win-golden`); host and IQN prefix come from config/settings, same as normal client boot scripts.
 
-**Flow:**
+**Session phases.** A session starts in the `install` phase (armed MAC gets `sanhook` + chain into WinPE for imaging). After the deploy script finishes — image applied, `bcdboot` run — switch the session to `boot_installed` from the Golden-tab banner: the machine's next PXE boot gets a plain `sanboot` of the golden target and runs the freshly installed OS for OOBE/drivers/sysprep. This replaces the manual static-file override the old flow needed the moment the install finished. The banner shows the current phase, and switching back to `install` re-serves WinPE (e.g. to redo a failed apply).
 
-1. In Settings, set `winpe_chain_url`.
+**The generated deploy script.** `GET /boot/files/deploy.cmd` (also snapshotted into the SMB share at arm time) collapses the entire WinPE command marathon into one commented script: diskpart (GPT, 300 MB ESP → S:, MSR, NTFS → W:) with the target disk chosen by **typed number + typed confirmation** against a size hint from the real golden zvol — never a blind `select disk 0`; `dism /Get-WimInfo` then apply with `/SWMFile:` automatically when split `.swm` media was detected (Windows Setup silently cannot install from split images) and `/ScratchDir:W:\` always (the WinPE RAM-disk scratch caused real failures); `bcdboot W:\Windows /s S: /f UEFI`; offline `SYSTEM`-hive edits setting `Start=0` on `MSiSCSI`, `iScsiPrt`, and every NIC service from the `nic_boot_services` setting (only keys that exist — missing ones warn, they're not created) — the fix for post-install `INACCESSIBLE_BOOT_DEVICE`; and installation of the disk-offline safety script (`/boot/files/fleetdeck-safety.ps1` → `W:\FleetDeck\`) registered via a **RunOnce → schtasks** entry rather than offline TaskCache writes (offline task registration means hand-crafting undocumented registry blobs; RunOnce is deterministic across builds). `golden_image_index` (setting) pre-bakes the dism index; blank prompts in WinPE.
+
+**Fetching the script in WinPE:** SMB is the guaranteed transport (`net use M: \\<truenas-host>\fleetdeck-bootfiles && M:\deploy.cmd`) — PowerShell is an optional WinPE component (`WinPE-PowerShell`), present on most retail Setup media but not promised, so where it exists `powershell -c "iwr http://<fleetdeck-host>/boot/files/deploy.cmd -OutFile X:\d.cmd" && X:\d.cmd` is the one-liner alternative.
+
+**Flow** (mirrored as a tick-off checklist in the Golden-tab banner, persisted per session):
+
+1. In Settings, set `winpe_chain_url` (normally FleetDeck's own `/boot/files/winpe.ipxe`).
 2. On the Dashboard, in **Discovered clients**, click **Boot into Golden Build Mode** on the target machine's MAC and confirm the modal. (Arming performs no TrueNAS mutation — it only changes what FleetDeck serves next. It is intentionally **not** gated by `DRY_RUN`; see the note below.)
-3. PXE-boot that machine. It sanhooks onto `win-golden`, boots WinPE, and you service the image in place.
-4. When done, click **End session** in the amber banner on the **Golden** tab (or let it auto-expire). Then promote a new `gold-vN` from the Golden tab as usual.
+3. PXE-boot that machine. It sanhooks onto `win-golden` and boots WinPE.
+4. In WinPE, fetch and run the deploy script (commands above).
+5. Switch the session phase to `boot_installed`, reboot the machine, complete OOBE/drivers/software.
+6. Sysprep exactly `C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown` (no `/mode:vm`), shut down.
+7. Click **End session** in the banner (or let it auto-expire). Then promote a new `gold-vN` from the Golden tab as usual.
 
 **Guardrails:**
 
