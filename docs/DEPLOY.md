@@ -230,3 +230,23 @@ e.g. from the safety `.ps1`: `Invoke-RestMethod -Method Post -Uri "http://192.16
 **Kick.** The TrueNAS API cannot terminate a specific iSCSI session (there is no such RPC in v25.10), so the drawer's "Kick" is labeled and implemented as a **forced reset**: the disk is wiped and re-cloned under the live session; the machine keeps running from cache until it reboots.
 
 **QR stickers.** Each client's detail drawer offers a print-friendly QR (generated server-side with the pure-JS `qrcode` package) linking to the static `/troubleshoot.html` guest help page.
+
+---
+
+## 7. Fleet operations
+
+**Tags & per-tag maintenance.** Clients carry comma-separated `tags` (edited in the detail drawer); the dashboard shows filter chips, and the Settings tab has **maintenance windows** — per-tag cron schedules with a `reset` or `wake` action, run by the scheduler alongside the global nightly cron (blank tag = whole fleet; scheduled resets always force). **Wake all** and CSV/JSON **exports** (client table, Audit tab) are also on those tabs; exports generate client-side from already-loaded data.
+
+**Webhooks.** Set `webhook_url` and `webhook_events` (comma-separated: `pool_warning`, `reset_failed`, `nightly_summary`). FleetDeck POSTs a generic `{event, ts, ...data}` JSON body — not Discord/Slack-specific, so it works with either via their incoming-webhook adapters. To send a formatted Discord/Slack embed, point `webhook_url` at a small relay that reshapes this payload.
+
+**Monitoring.** `GET /healthz` (unauthenticated, `{ok, truenas, dryRun}`) for uptime checks; `GET /metrics` (unauthenticated, Prometheus text) exposes `fleetdeck_clients_total`, `_clients_booted`, `_truenas_connected`, `_dry_run`, `_pool_used_percent` — counts and state only, no identities. The dashboard's pool-used tile shows a sparkline from the `pool_history` series the pool monitor records every 5 minutes.
+
+**Update check.** FleetDeck checks the latest GitHub release tag once a day and shows an "update available" badge in Settings. No auto-update — updates stay manual.
+
+**Multiple admins.** The Settings tab manages named local accounts (scrypt-hashed). While the `admins` table is empty, the `ADMIN_PASSWORD` env var logs in as `admin` (existing deployments are untouched); once any named account exists, only those accounts work, the login form's username field is required, and the last account can't be deleted (lockout guard). `session_timeout_minutes` (default 720) sets the cookie lifetime, replacing the old hardcoded 12h.
+
+**Backup / restore.** Settings → **Download backup** streams a consistent `VACUUM INTO` copy of the SQLite state (not the live file). **Restore** validates the upload is a compatible FleetDeck database, then replaces every table on the live connection inside one transaction (so no restart is needed); it requires typing `RESTORE FLEETDECK` to confirm. Boot files are not part of the backup.
+
+**API-key rotation.** TrueNAS doesn't expose API-key creation dates, so set `api_key_created_at` (e.g. `2026-07-01`) when you create/rotate the key; Settings shows a banner once it exceeds `api_key_max_age_days` (default 180).
+
+**Build provenance.** `GIT_COMMIT` and `BUILD_DATE` (Docker build args, baked to env) show in Settings and `/api/system/info`.

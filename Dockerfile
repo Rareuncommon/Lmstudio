@@ -32,6 +32,15 @@ COPY package.json package-lock.json ./
 # Application source.
 COPY src ./src
 
+# Build provenance shown in Settings and /api/system/info. Pass at build time:
+#   docker build --build-arg GIT_COMMIT=$(git rev-parse HEAD) \
+#                --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) .
+# Baked as env vars so the running process can read them (no .git in the image).
+ARG GIT_COMMIT=""
+ARG BUILD_DATE=""
+ENV GIT_COMMIT=$GIT_COMMIT
+ENV BUILD_DATE=$BUILD_DATE
+
 # SQLite data lives here; mount a host-path volume over it to persist state.
 RUN mkdir -p /data && chown -R fleetdeck:fleetdeck /app /data
 VOLUME ["/data"]

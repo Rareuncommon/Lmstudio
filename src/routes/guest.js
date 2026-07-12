@@ -90,6 +90,11 @@ ${motd ? `<div class="motd">${esc(motd)}</div>` : ''}
         fields.gpu_vendor = body.gpu_vendor || null;
       }
       if (body.notes !== undefined) fields.notes = body.notes === null ? null : String(body.notes);
+      if (body.tags !== undefined) {
+        // Normalize: trim, drop empties, dedupe — stored comma-separated.
+        const tags = String(body.tags || '').split(',').map((s) => s.trim()).filter(Boolean);
+        fields.tags = tags.length ? [...new Set(tags)].join(',') : null;
+      }
       if (Object.keys(fields).length === 0) return res.status(400).json({ error: 'nothing to update' });
       updateClient(db, req.params.id, fields);
       logEvent(db, { action: 'client.meta_updated', clientId: client.id, before: { gpu_vendor: client.gpu_vendor, notes: client.notes }, after: fields });

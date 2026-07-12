@@ -143,6 +143,7 @@ const state = {
   selected: new Set(),      // client ids (survives re-render + pagination)
   search: "",
   statusFilter: "",
+  tagFilter: "",
   sort: { key: null, dir: 1 }, // null = server order (by id)
   page: 0,
   loadedClientsOnce: false,   // gates the skeleton row rendering
@@ -219,12 +220,15 @@ function renderStamp() {
 
 /* ========================= Client table ================================= */
 
+const clientTags = (c) => String(c.tags || "").split(",").map((s) => s.trim()).filter(Boolean);
+
 function visibleClients() {
   let list = state.clients;
   const q = state.search.trim().toLowerCase();
   if (q) list = list.filter((c) =>
     String(c.name).toLowerCase().includes(q) || String(c.mac).toLowerCase().includes(q));
   if (state.statusFilter) list = list.filter((c) => c.status === state.statusFilter);
+  if (state.tagFilter) list = list.filter((c) => clientTags(c).includes(state.tagFilter));
   if (state.sort.key) {
     const { key, dir } = state.sort;
     list = [...list].sort((a, b) => {
@@ -315,6 +319,15 @@ function renderClients() {
     pager.style.display = "none";
   }
 
+  // Tag filter chips: derived from whatever tags exist right now. Clicking a
+  // chip filters; the active one clears on second click. Selecting all
+  // visible rows (sel-all) then bulk-resetting is "reset-all-by-tag".
+  const allTags = [...new Set(state.clients.flatMap(clientTags))].sort();
+  const chipRoot = $("#tag-chips");
+  chipRoot.innerHTML = allTags.length ? allTags.map((t) =>
+    `<button class="tag${state.tagFilter === t ? " toggle-on" : ""}" data-tag-chip="${esc(t)}" style="cursor:pointer">${esc(t)}${state.tagFilter === t ? " ✕" : ""}</button>`
+  ).join("") : "";
+
   // Sort arrows on headers.
   for (const th of $$("#clients th.sortable")) {
     const base = th.textContent.replace(/ [▲▼]$/, "");
@@ -357,6 +370,23 @@ async function loadPoolStatus() {
   } catch (e) { return null; }
 }
 
+// Inline pool-usage sparkline (item 35), fed by the pool_history table the
+// pool monitor now records (one point per 5 min, pruned server-side).
+function sparklineSVG(points) {
+  if (!points || points.length < 2) return "";
+  const w = 84, h = 20;
+  const vals = points.map((p) => p.used_percent);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const span = (max - min) || 1;
+  const pts = vals.map((v, i) =>
+    `${((i / (vals.length - 1)) * w).toFixed(1)},${(h - ((v - min) / span) * (h - 3) - 1.5).toFixed(1)}`).join(" ");
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block;margin-top:2px"><polyline points="${pts}" fill="none" stroke="var(--accent-d)" stroke-width="1.5"/></svg>`;
+}
+
+async function loadPoolHistory() {
+  try { state.poolHistory = await api("GET", "/api/pool/history"); } catch (e) {}
+}
+
 function renderStatTiles(poolStatus) {
   if (!state.loadedClientsOnce) {
     $("#stat-tiles").innerHTML = Array.from({ length: 4 }, () =>
@@ -374,12 +404,12 @@ function renderStatTiles(poolStatus) {
   if (poolStatus && poolStatus.usedPercent != null) {
     const pct = poolStatus.usedPercent;
     const cls = pct >= 95 ? "crit" : pct >= 85 ? "warn" : "";
-    tiles.push({ l: "Pool used", n: pct.toFixed(1) + "%", cls });
+    tiles.push({ l: "Pool used", n: pct.toFixed(1) + "%", cls, spark: sparklineSVG(state.poolHistory) });
   } else {
     tiles.push({ l: "Pool used", n: "—" });
   }
   $("#stat-tiles").innerHTML = tiles.map((t) =>
-    `<div class="tile ${t.cls || ""}"><div class="n">${esc(t.n)}</div><div class="l">${esc(t.l)}</div></div>`).join("");
+    `<div class="tile ${t.cls || ""}"><div class="n">${esc(t.n)}</div><div class="l">${esc(t.l)}</div>${t.spark || ""}</div>`).join("");
 }
 
 async function loadDiscovered() {
@@ -517,6 +547,38 @@ $("#sel-all").addEventListener("change", (e) => {
     else state.selected.delete(c.value);
   }
   updateBulkButtons();
+});
+
+$("#tag-chips").addEventListener("click", (e) => {
+  const chip = e.target.closest("[data-tag-chip]");
+  if (!chip) return;
+  state.tagFilter = state.tagFilter === chip.dataset.tagChip ? "" : chip.dataset.tagChip;
+  state.page = 0;
+  renderClients();
+});
+
+$("#wake-all").addEventListener("click", async () => {
+  try {
+    const r = await api("POST", "/api/clients/wake-all");
+    toast(`Wake-on-LAN sent to ${r.sent} machine(s)${r.failed ? `, ${r.failed} failed` : ""}`);
+  } catch (err) { toast(err.message, "err"); }
+});
+
+// CSV export (item 34): pure client-side from already-loaded, currently
+// filtered data — no server round-trip for something this simple.
+function downloadBlob(name, mime, content) {
+  const a = el("a", { href: URL.createObjectURL(new Blob([content], { type: mime })), download: name });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+const csvCell = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+
+$("#export-clients").addEventListener("click", () => {
+  const cols = ["id", "name", "mac", "zvol", "target_name", "golden_snapshot", "status", "tags", "gpu_vendor", "space_used_bytes", "last_boot_at", "notes"];
+  const rows = visibleClients();
+  const csv = [cols.join(","), ...rows.map((c) => cols.map((k) => csvCell(c[k])).join(","))].join("\n");
+  downloadBlob(`fleetdeck-clients-${new Date().toISOString().slice(0, 10)}.csv`, "text/csv", csv);
+  toast(`Exported ${rows.length} client(s)`);
 });
 
 // Search / filter / sort / pagination wiring.
@@ -731,6 +793,8 @@ async function openDrawer(id) {
         <span class="k">Heartbeat</span><span>${fmtTime(c.last_heartbeat_at)}</span>
         <span class="k">Created</span><span>${fmtTime(c.created_at)}</span>
         <span class="k">GPU</span><span><select data-gpu style="width:120px">${gpuOpts}</select></span>
+        <span class="k">Tags</span><span><input data-tags class="mono" style="width:180px" value="${esc(c.tags || "")}" placeholder="vip,corner (comma-sep)"></span>
+        <span class="k">Notes</span><span><input data-notes style="width:180px" value="${esc(c.notes || "")}" placeholder="free text"></span>
         <span class="k">Flags</span><span>${c.boot_golden_once ? '<span class="tag toggle-on">golden-once</span> ' : ""}${c.nightly_reset ? '<span class="tag">nightly</span>' : ""}</span>
       </div>
       <div class="row" style="margin-bottom:12px">
@@ -754,6 +818,19 @@ async function openDrawer(id) {
       loadClients();
     } catch (err) { toast(err.message, "err"); }
   });
+  // Tags/notes save on blur or Enter, not per keystroke.
+  for (const [sel, field, label] of [["[data-tags]", "tags", "Tags"], ["[data-notes]", "notes", "Notes"]]) {
+    const input = drawer.querySelector(sel);
+    const save = async () => {
+      try {
+        await api("POST", `/api/clients/${id}/meta`, { [field]: input.value });
+        toast(`${label} saved`);
+        loadClients();
+      } catch (err) { toast(err.message, "err"); }
+    };
+    input.addEventListener("change", save);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); });
+  }
 
   drawer.querySelector("[data-kick]").addEventListener("click", async () => {
     const ok = await confirmModal("Kick (forced reset)",
@@ -1037,19 +1114,52 @@ async function loadGolden() {
     return;
   }
   $("#golden-empty").innerHTML = "";
+  // Fleet-version view (item 36): the newest gold-vN is the rebase target;
+  // every older snapshot that still has clients gets a one-click "move these
+  // N to latest" alongside the existing rebase-stragglers-to-this action.
+  const latest = state.goldenNames.reduce((best, n) => {
+    const v = (n.match(/^gold-v(\d+)$/) || [])[1];
+    const bv = (best && best.match(/^gold-v(\d+)$/) || [])[1];
+    return v && (!bv || parseInt(v, 10) > parseInt(bv, 10)) ? n : best;
+  }, state.goldenNames[0]);
   for (const s of snaps) {
     const on = (s.clients || []).map((c) => esc(c.name)).join(", ") || '<span class="muted">none</span>';
+    const stale = s.name !== latest && (s.clients || []).length > 0;
     const tr = el("tr");
-    tr.innerHTML = `<td class="mono">${esc(s.name)}</td><td>${fmtBytes(s.used)}</td>
+    tr.innerHTML = `<td class="mono">${esc(s.name)}${s.name === latest ? ' <span class="tag toggle-on">latest</span>' : ""}</td><td>${fmtBytes(s.used)}</td>
       <td>${on} <span class="muted">(${(s.clients || []).length})</span></td>
-      <td><button data-snap="${esc(s.name)}" data-act="bulk-rebase">Rebase stragglers here</button></td>`;
+      <td class="actions">
+        <button data-snap="${esc(s.name)}" data-act="bulk-rebase">Rebase stragglers here</button>
+        ${stale ? `<button class="accent" data-act="move-latest" data-snap="${esc(s.name)}" data-latest="${esc(latest)}" data-ids="${(s.clients || []).map((c) => c.id).join(",")}">Move ${(s.clients || []).length} → ${esc(latest)}</button>` : ""}
+      </td>`;
     body.appendChild(tr);
   }
 }
 
 $("#golden-body").addEventListener("click", async (e) => {
   const b = e.target.closest("button");
-  if (!b || b.dataset.act !== "bulk-rebase") return;
+  if (!b) return;
+  if (b.dataset.act === "move-latest") {
+    const ids = b.dataset.ids.split(",").map(Number).filter(Boolean);
+    const target = b.dataset.latest;
+    const ok = await confirmModal("Rebase to latest",
+      `<p>Rebase the ${ids.length} client(s) still on <b class="mono">${esc(b.dataset.snap)}</b> onto <b class="mono">${esc(target)}</b>? Their disks are wiped and re-cloned (session-active machines are skipped, with a force pass offered).</p>`,
+      { confirmText: "Rebase" });
+    if (!ok) return;
+    try {
+      const r = await api("POST", "/api/golden/bulk-rebase", { clientIds: ids, goldenSnapshot: target, force: false });
+      const results = r.results || [];
+      const stuck = results.filter((x) => !x.ok && /session/i.test(x.error || "")).map((x) => x.id);
+      const fail = results.filter((x) => !x.ok && !stuck.includes(x.id)).length;
+      toast(`Rebased ${results.length - fail - stuck.length} ok, ${fail} failed${stuck.length ? `, ${stuck.length} skipped (active session)` : ""}`, fail ? "err" : "ok");
+      if (stuck.length && await confirmModal("Force rebase stuck", `<p>${stuck.length} client(s) have an active session.</p>`, { danger: true, confirmText: `Force rebase ${stuck.length}` })) {
+        await api("POST", "/api/golden/bulk-rebase", { clientIds: stuck, goldenSnapshot: target, force: true });
+      }
+      loadClients(); loadGolden();
+    } catch (err) { toast(err.message, "err"); }
+    return;
+  }
+  if (b.dataset.act !== "bulk-rebase") return;
   const snap = b.dataset.snap;
   try { if (!state.clients.length) state.clients = await api("GET", "/api/clients"); } catch (er) {}
   const ids = state.clients.filter((c) => c.golden_snapshot !== snap).map((c) => c.id);
@@ -1404,6 +1514,15 @@ const SETTINGS_DEFAULTS = {
   // Shown as a banner on the public /status page (FleetDeck cannot display
   // text inside Windows itself; bake anything in-OS into the golden image).
   guest_motd: "",
+  // Outbound webhook: generic JSON POST, events comma-separated.
+  webhook_url: "",
+  webhook_events: "pool_warning,reset_failed,nightly_summary",
+  // Admin session cookie lifetime (was hardcoded 12h).
+  session_timeout_minutes: "720",
+  // Set manually when you (re)create the TrueNAS API key — TrueNAS doesn't
+  // expose key creation dates, so rotation hygiene needs the operator's help.
+  api_key_created_at: "",
+  api_key_max_age_days: "180",
 };
 async function loadSettings() {
   let s = {};
@@ -1416,7 +1535,147 @@ async function loadSettings() {
     inp.dataset.key = k;
     g.appendChild(inp);
   }
+  loadSystemInfo(merged);
+  loadWindows();
+  loadAdmins();
 }
+
+async function loadSystemInfo(settings) {
+  try {
+    const info = await api("GET", "/api/system/info");
+    const bits = [`<span class="tag">v${esc(info.version)}</span>`];
+    if (info.gitCommit) bits.push(`<span class="tag mono">${esc(info.gitCommit.slice(0, 8))}</span>`);
+    if (info.buildDate) bits.push(`<span class="muted">built ${esc(info.buildDate)}</span>`);
+    if (info.adminUser) bits.push(`<span class="muted">logged in as <b>${esc(info.adminUser)}</b></span>`);
+    if (info.update && info.update.updateAvailable) {
+      bits.push(`<a class="tag" style="color:var(--amber);border-color:var(--amber)" href="${esc(info.update.url)}" target="_blank">update available: v${esc(info.update.latest)}</a>`);
+    }
+    $("#system-info").innerHTML = bits.join(" ");
+  } catch (e) {}
+
+  // API-key rotation hygiene (item 40): age computed from the manually-set
+  // creation date, since TrueNAS doesn't expose it.
+  const banner = $("#apikey-banner");
+  const createdAt = settings.api_key_created_at;
+  const maxDays = parseInt(settings.api_key_max_age_days, 10) || 180;
+  if (createdAt && !isNaN(new Date(createdAt))) {
+    const ageDays = Math.floor((Date.now() - new Date(createdAt).getTime()) / 86400000);
+    banner.innerHTML = ageDays > maxDays
+      ? `<div class="gb-banner" style="margin-top:10px"><span class="icon">🔑</span><div><div class="headline">TrueNAS API key is ${ageDays} days old</div><div class="detail">Older than the ${maxDays}-day rotation threshold — rotate it in TrueNAS (Settings &gt; API Keys), update TRUENAS_API_KEY, and set api_key_created_at to today.</div></div></div>`
+      : `<div class="muted" style="margin-top:8px">API key age: ${ageDays} days (rotation threshold ${maxDays}).</div>`;
+  } else {
+    banner.innerHTML = `<div class="muted" style="margin-top:8px">Set <span class="mono">api_key_created_at</span> (e.g. 2026-07-01) to enable API-key age tracking.</div>`;
+  }
+}
+
+async function loadWindows() {
+  let list = [];
+  try { list = await api("GET", "/api/maintenance-windows"); } catch (e) { return; }
+  const body = $("#windows-body");
+  body.innerHTML = list.length ? "" : '<tr><td colspan="4" class="muted">None — only the global nightly cron applies</td></tr>';
+  for (const w of list) {
+    const tr = el("tr");
+    tr.innerHTML = `<td>${w.tag ? esc(w.tag) : '<span class="muted">(all clients)</span>'}</td>
+      <td class="mono">${esc(w.cron)}</td><td>${esc(w.action)}</td>
+      <td><button class="danger" data-window-del="${w.id}">Delete</button></td>`;
+    body.appendChild(tr);
+  }
+}
+
+$("#windows-body").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-window-del]");
+  if (!b) return;
+  try {
+    await api("DELETE", `/api/maintenance-windows/${b.dataset.windowDel}`);
+    toast("Window deleted");
+    loadWindows();
+  } catch (err) { toast(err.message, "err"); }
+});
+
+$("#window-add").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    await api("POST", "/api/maintenance-windows", { tag: f.tag.value.trim(), cron: f.cron.value.trim(), action: f.action.value });
+    toast("Maintenance window added");
+    f.reset();
+    loadWindows();
+  } catch (err) { toast(err.message, "err"); }
+});
+
+async function loadAdmins() {
+  let list = [];
+  try { list = await api("GET", "/api/admins"); } catch (e) { return; }
+  const body = $("#admins-body");
+  body.innerHTML = list.length ? "" : '<tr><td colspan="3" class="muted">None — ADMIN_PASSWORD env var active (username "admin")</td></tr>';
+  for (const a of list) {
+    const tr = el("tr");
+    tr.innerHTML = `<td>${esc(a.username)}</td><td class="muted">${fmtTime(a.created_at)}</td>
+      <td><button class="danger" data-admin-del="${a.id}" data-name="${esc(a.username)}">Delete</button></td>`;
+    body.appendChild(tr);
+  }
+}
+
+$("#admins-body").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-admin-del]");
+  if (!b) return;
+  const ok = await confirmModal(`Delete admin ${b.dataset.name}`, "<p>Their sessions stay valid until the cookie expires; new logins stop immediately.</p>", { danger: true, confirmText: "Delete" });
+  if (!ok) return;
+  try {
+    await api("DELETE", `/api/admins/${b.dataset.adminDel}`);
+    toast("Admin deleted");
+    loadAdmins();
+  } catch (err) { toast(err.message, "err"); }
+});
+
+$("#admin-add").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    await api("POST", "/api/admins", { username: f.username.value.trim(), password: f.password.value });
+    toast(`Admin ${f.username.value.trim()} created — the env password is now disabled`);
+    f.reset();
+    loadAdmins();
+  } catch (err) { toast(err.message, "err"); }
+});
+
+// Backup: fetch with credentials, then hand the bytes to the browser as a
+// download (an <a href> wouldn't send the POST).
+$("#backup-btn").addEventListener("click", async () => {
+  try {
+    const res = await fetch("/api/backup", { method: "POST", credentials: "same-origin" });
+    if (!res.ok) throw new Error((await res.json().catch(() => null) || {}).error || res.statusText);
+    const blob = await res.blob();
+    const a = el("a", { href: URL.createObjectURL(blob), download: `fleetdeck-backup-${new Date().toISOString().slice(0, 10)}.sqlite3` });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    toast("Backup downloaded");
+  } catch (err) { toast(err.message, "err"); }
+});
+
+$("#restore-btn").addEventListener("click", (e) => { e.preventDefault(); $("#restore-file").click(); });
+$("#restore-file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  const typed = await openModal({
+    title: "Restore from backup",
+    bodyHTML: `<p><b style="color:var(--red)">This replaces ALL current FleetDeck state</b> (clients, settings, audit history, sessions) with the contents of <span class="mono">${esc(file.name)}</span>. TrueNAS itself is not touched, but a backup that doesn't match reality will desync the dashboard until you reconcile.</p>`,
+    danger: true, confirmText: "Restore", typeToConfirm: "RESTORE FLEETDECK",
+  });
+  if (!typed) return;
+  try {
+    const res = await fetch("/api/restore?confirm=" + encodeURIComponent("RESTORE FLEETDECK"), {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: await file.arrayBuffer(),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((data && data.error) || res.statusText);
+    toast("Restore complete — reloading");
+    setTimeout(() => location.reload(), 800);
+  } catch (err) { toast(err.message, "err"); }
+});
 $("#save-settings").addEventListener("click", async () => {
   const patch = {};
   for (const i of $$("#settings-grid input")) patch[i.dataset.key] = i.value;
@@ -1580,9 +1839,21 @@ $("#logout").addEventListener("click", async () => {
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
-    await api("POST", "/api/auth/login", { password: e.target.password.value });
+    const body = { password: e.target.password.value };
+    const uname = e.target.username.value.trim();
+    if (uname) body.username = uname; // blank = legacy env-password login
+    await api("POST", "/api/auth/login", body);
     e.target.reset(); $("#login-msg").textContent = ""; boot();
-  } catch (err) { $("#login-msg").textContent = err.message === "unauthorized" ? "Wrong password" : err.message; }
+  } catch (err) { $("#login-msg").textContent = err.message === "unauthorized" ? "Wrong credentials" : err.message; }
+});
+
+// Audit export (item 34): JSON of the currently loaded events.
+$("#export-events").addEventListener("click", async () => {
+  try {
+    const list = await api("GET", "/api/events?limit=1000");
+    downloadBlob(`fleetdeck-audit-${new Date().toISOString().slice(0, 10)}.json`, "application/json", JSON.stringify(list, null, 2));
+    toast(`Exported ${list.length} events`);
+  } catch (err) { toast(err.message, "err"); }
 });
 
 let pollTimer = null;
@@ -1603,6 +1874,7 @@ async function boot() {
         state.goldenNames.map((g) => `<option>${esc(g)}</option>`).join("");
     } catch (e) {}
     renderClients();
+    await loadPoolHistory();
     renderStatTiles(await loadPoolStatus());
     renderStamp();
     loadDiscovered();
@@ -1626,7 +1898,7 @@ async function boot() {
       if (!$("#dashboard").classList.contains("active")) return;
       tickCount += 1;
       if (!state.wsConnected) { loadClients(); loadDiscovered(); }
-      else if (tickCount % 6 === 0) loadPoolStatus().then(renderStatTiles);
+      else if (tickCount % 6 === 0) loadPoolHistory().then(() => loadPoolStatus().then(renderStatTiles));
     }, 10000);
   } catch (e) { /* 401 handled by api() -> showLogin */ }
 }

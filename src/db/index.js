@@ -16,7 +16,7 @@ changes.setMaxListeners(20);
 const CLIENT_COLUMNS = [
   'name', 'mac', 'zvol', 'target_name', 'golden_snapshot', 'raw_override',
   'boot_golden_once', 'nightly_reset', 'status', 'space_used_bytes',
-  'notes', 'last_boot_at', 'gpu_vendor', 'last_heartbeat_at',
+  'notes', 'last_boot_at', 'gpu_vendor', 'last_heartbeat_at', 'tags',
 ];
 
 function initDb(dbPath) {
@@ -49,6 +49,12 @@ function initDb(dbPath) {
   // disk-offline safety script may not have run).
   if (!clientCols.has('last_heartbeat_at')) {
     db.exec('ALTER TABLE clients ADD COLUMN last_heartbeat_at TEXT');
+  }
+  // tags: comma-separated TEXT rather than a join table — least disruptive
+  // to the existing queries (everything reads whole client rows), and fleet
+  // sizes here make LIKE-free in-app filtering trivial.
+  if (!clientCols.has('tags')) {
+    db.exec('ALTER TABLE clients ADD COLUMN tags TEXT');
   }
   return db;
 }
@@ -244,6 +250,72 @@ function listClientSessions(db, clientId, { limit = 50 } = {}) {
   ).all(clientId, limit);
 }
 
+// --- Maintenance windows -------------------------------------------------------
+
+function listMaintenanceWindows(db) {
+  return db.prepare('SELECT * FROM maintenance_windows ORDER BY id').all();
+}
+
+function insertMaintenanceWindow(db, { tag = '', cron, action = 'reset' }) {
+  const info = db.prepare(
+    'INSERT INTO maintenance_windows (tag, cron, action) VALUES (?, ?, ?)'
+  ).run(tag, cron, action);
+  return info.lastInsertRowid;
+}
+
+function deleteMaintenanceWindow(db, id) {
+  db.prepare('DELETE FROM maintenance_windows WHERE id = ?').run(id);
+}
+
+// --- Admin accounts --------------------------------------------------------------
+
+function listAdmins(db) {
+  return db.prepare('SELECT id, username, last_seen_version, created_at FROM admins ORDER BY id').all();
+}
+
+function getAdminByUsername(db, username) {
+  return db.prepare('SELECT * FROM admins WHERE username = ?').get(username) || null;
+}
+
+function insertAdmin(db, { username, passwordHash }) {
+  const info = db.prepare('INSERT INTO admins (username, password_hash) VALUES (?, ?)').run(username, passwordHash);
+  return info.lastInsertRowid;
+}
+
+function deleteAdmin(db, id) {
+  db.prepare('DELETE FROM admins WHERE id = ?').run(id);
+}
+
+function countAdmins(db) {
+  return db.prepare('SELECT COUNT(*) AS n FROM admins').get().n;
+}
+
+function setAdminLastSeenVersion(db, username, version) {
+  db.prepare('UPDATE admins SET last_seen_version = ? WHERE username = ?').run(version, username);
+}
+
+// --- Pool capacity history --------------------------------------------------------
+
+function insertPoolHistory(db, usedPercent) {
+  db.prepare('INSERT INTO pool_history (used_percent) VALUES (?)').run(usedPercent);
+  // Bounded: ~2000 points ≈ a week at 5-minute intervals; prune the tail so
+  // the table can't grow without limit on a box that runs for years.
+  db.prepare(
+    'DELETE FROM pool_history WHERE id <= (SELECT MAX(id) FROM pool_history) - 2000'
+  ).run();
+}
+
+function lastPoolHistoryAt(db) {
+  const row = db.prepare('SELECT ts FROM pool_history ORDER BY id DESC LIMIT 1').get();
+  return row ? row.ts : null;
+}
+
+function listPoolHistory(db, { limit = 288 } = {}) {
+  return db.prepare(
+    'SELECT ts, used_percent FROM (SELECT * FROM pool_history ORDER BY id DESC LIMIT ?) ORDER BY id'
+  ).all(limit);
+}
+
 // --- Hardware gap reports -----------------------------------------------------
 
 function insertHardwareGap(db, { clientId = null, mac = null, description, source = 'manual' }) {
@@ -348,5 +420,8 @@ module.exports = {
   closeActiveGoldenBuildSession, closeExpiredGoldenBuildSessions,
   getOpenSession, openSession, closeSession, markSessionIdleReset, listClientSessions,
   insertHardwareGap, listHardwareGaps, deleteHardwareGap,
+  listMaintenanceWindows, insertMaintenanceWindow, deleteMaintenanceWindow,
+  listAdmins, getAdminByUsername, insertAdmin, deleteAdmin, countAdmins, setAdminLastSeenVersion,
+  insertPoolHistory, lastPoolHistoryAt, listPoolHistory,
   changes,
 };

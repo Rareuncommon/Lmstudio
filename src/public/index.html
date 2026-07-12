@@ -76,6 +76,7 @@
         <div id="bulk-import-results"></div>
       </div>
 
+      <div id="tag-chips" class="row" style="margin-bottom:6px"></div>
       <div class="toolbar">
         <input class="search" id="client-search" placeholder="Search name or MAC…" autocomplete="off">
         <select id="status-filter">
@@ -86,6 +87,8 @@
         </select>
         <span class="spacer" style="flex:1"></span>
         <div class="bulk">
+          <button id="wake-all" title="Sends a WoL magic packet to every registered MAC">Wake all</button>
+          <button id="export-clients" title="Download the (filtered) client list">Export CSV</button>
           <button id="bulk-reset" disabled>Reset selected</button>
           <button id="bulk-retire" class="danger" disabled>Retire selected</button>
           <button id="bulk-nightly-on" disabled>Nightly on</button>
@@ -206,9 +209,52 @@
           <span id="tc-msg" class="msg"></span>
         </div>
       </div>
+      <div class="panel">
+        <h2 style="margin-top:0">System</h2>
+        <div id="system-info" class="row"></div>
+        <div id="apikey-banner"></div>
+      </div>
+      <div class="panel">
+        <h2 style="margin-top:0">Maintenance windows (per-tag schedules)</h2>
+        <p class="muted" style="margin:0 0 8px">Each window is its own cron; the action applies to clients carrying the tag (blank tag = every client). Scheduled resets always force, like the nightly cron.</p>
+        <table>
+          <thead><tr><th>Tag</th><th>Cron</th><th>Action</th><th></th></tr></thead>
+          <tbody id="windows-body"></tbody>
+        </table>
+        <form id="window-add" class="row" style="margin-top:8px" autocomplete="off">
+          <input name="tag" placeholder="tag (blank = all)" style="width:130px">
+          <input name="cron" placeholder="0 5 * * *" class="mono" style="width:110px" required>
+          <select name="action"><option value="reset">reset</option><option value="wake">wake</option></select>
+          <button class="accent" type="submit">Add window</button>
+        </form>
+      </div>
+      <div class="panel">
+        <h2 style="margin-top:0">Admin accounts</h2>
+        <p class="muted" style="margin:0 0 8px">While this list is empty, the ADMIN_PASSWORD env var logs in as "admin". Once any named account exists, only these accounts work.</p>
+        <table>
+          <thead><tr><th>Username</th><th>Created</th><th></th></tr></thead>
+          <tbody id="admins-body"></tbody>
+        </table>
+        <form id="admin-add" class="row" style="margin-top:8px" autocomplete="off">
+          <input name="username" placeholder="username" style="width:130px" required>
+          <input name="password" type="password" placeholder="password (min 8)" style="width:160px" required>
+          <button class="accent" type="submit">Add admin</button>
+        </form>
+      </div>
+      <div class="panel">
+        <h2 style="margin-top:0">Backup &amp; restore</h2>
+        <div class="row">
+          <button id="backup-btn" class="accent">Download backup</button>
+          <label><input type="file" id="restore-file" style="display:none"><button id="restore-btn" class="danger">Restore from backup…</button></label>
+        </div>
+        <p class="muted" style="margin:8px 0 0">Backups are consistent VACUUM'd copies of the SQLite state (clients, settings, audit, sessions — not the boot files). Restoring replaces the current state and asks for a typed confirmation.</p>
+      </div>
     </section>
 
     <section id="events">
+      <div class="row" style="margin-bottom:8px">
+        <button id="export-events">Export JSON</button>
+      </div>
       <table>
         <thead><tr><th>Timestamp</th><th>Action</th><th>Client</th><th>Actor</th><th></th></tr></thead>
         <tbody id="events-body"></tbody>
@@ -221,7 +267,8 @@
 <div id="login" class="login-wrap" style="display:none">
   <form class="login-box" id="login-form">
     <div class="brand">FLEETDECK</div>
-    <input type="password" name="password" placeholder="Password" autofocus required>
+    <input type="text" name="username" placeholder="Username (blank = admin)" autocomplete="username">
+    <input type="password" name="password" placeholder="Password" autofocus required autocomplete="current-password">
     <button class="accent" type="submit">Unlock</button>
     <div id="login-msg" class="msg err"></div>
   </form>

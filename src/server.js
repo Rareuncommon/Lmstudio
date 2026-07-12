@@ -22,6 +22,9 @@ const { createGoldenBuildRouter } = require('./routes/goldenBuild');
 const { createBootFilesRouter } = require('./routes/bootFiles');
 const { createSetupRouter } = require('./routes/setup');
 const { createGuestRouter } = require('./routes/guest');
+const { createSystemRouter } = require('./routes/system');
+const { createFleetOpsRouter } = require('./routes/fleetOps');
+const { startUpdateCheck } = require('./services/updateCheck');
 const { ensureBootDirs, recordBootActivity } = require('./services/bootFiles');
 const { startTftpServer } = require('./services/tftp');
 const { createTrueNasStatusRouter } = require('./routes/truenas');
@@ -178,7 +181,7 @@ async function main() {
   app.use(createBootRouter(ctx));
 
   // Also unauthenticated: you can't require a session cookie to obtain one.
-  app.use(createAuthRouter({ adminPassword: config.adminPassword, cookieSecret: config.cookieSecret }));
+  app.use(createAuthRouter(ctx));
 
   // Static frontend shell is served without auth — it's just the SPA's HTML/JS/CSS.
   // The page's own JS hits the API, gets 401, and shows its login form. `app.use`
@@ -201,6 +204,10 @@ async function main() {
   // never touches it — that page is unauthenticated by design (see
   // routes/guest.js for the trust-boundary rationale).
   app.use(createGuestRouter(ctx));
+  // Same split as the guest router: /healthz + /metrics are unauthenticated
+  // monitoring endpoints (not under /api); /api/system/* stays protected.
+  app.use(createSystemRouter(ctx));
+  app.use(createFleetOpsRouter(ctx));
   app.use(createTrueNasStatusRouter(ctx));
 
   app.get('/api/events', (req, res) => {
@@ -236,10 +243,15 @@ async function main() {
   // Read live per-request by the settings route, not destructured at startup,
   // so a later settings change can still trigger a reschedule.
   ctx.rescheduleCron = scheduler.reschedule;
+  // Maintenance-window CRUD routes call this so cron edits apply live.
+  ctx.rescheduleWindows = scheduler.rescheduleWindows;
 
   // Attached to ctx (not captured by routes/pool.js at construction time) so
   // GET /api/pool/status can read the latest reading on every request.
   ctx.poolMonitor = startPoolMonitor(ctx);
+
+  // Daily latest-release check for the Settings "update available" badge.
+  const updateCheck = startUpdateCheck(ctx);
 
   const server = app.listen(config.httpPort, config.httpBind, () => {
     console.log(
@@ -282,6 +294,7 @@ async function main() {
     scheduler.stop();
     if (ctx.poolMonitor) ctx.poolMonitor.stop();
     if (ctx.push) ctx.push.stop();
+    if (updateCheck) updateCheck.stop();
     if (tftp) tftp.close();
     server.close();
     if (holder.client) {
